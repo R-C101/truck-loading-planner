@@ -45,8 +45,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DEFAULT = pd.DataFrame({
-    "Weight_kg": pd.Series([], dtype="float"),
     "Item":      pd.Series([], dtype="object"),
+    "Weight_kg": pd.Series([], dtype="float"),
     "Qty":       pd.Series([], dtype="Int64"),
 })
 
@@ -82,8 +82,8 @@ data = pd.read_csv(up) if up is not None else DEFAULT.copy()
 edited = st.data_editor(
     data, num_rows="dynamic", use_container_width=True, hide_index=True, key="grid",
     column_config={
-        "Weight_kg": st.column_config.NumberColumn("Weight (kg)", min_value=0, step=1),
         "Item": st.column_config.TextColumn("Item", width="large"),
+        "Weight_kg": st.column_config.NumberColumn("Weight (kg)", min_value=0, step=1),
         "Qty": st.column_config.NumberColumn("Quantity", min_value=0, step=1),
     },
 )
