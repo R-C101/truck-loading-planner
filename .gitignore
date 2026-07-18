@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+_to_delete/
+.DS_Store
+
+# sensitive shipment data — keep out of the public repo
+Drum_Truck_Loading_Plan.xlsx
+example_drums.csv

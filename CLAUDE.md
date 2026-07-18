@@ -1,0 +1,57 @@
+# CLAUDE.md — Truck Loading Optimisation
+
+Context for anyone (including Claude Code) working in this folder. This documents
+what already exists and how it fits together. It is **not** a task list.
+
+## Purpose
+Work out the fewest trucks needed to ship a set of steel drums, given a weight
+limit per truck (21,500 kg comfortable / 21,772 kg = 48,000 lb hard) and optional
+constraints. The end user is non-technical and only ever sees the Streamlit app.
+
+## Files
+- **`solver_core.py`** — the engine, no UI. `optimize(items, capacity, ...)` packs
+  weighted items into bins, minimising bin count. Two engines: exact OR-tools
+  CP-SAT (proves the minimum) and a pure-Python heuristic (best/first-fit-decreasing
+  + seeded random restarts + local improvement). It runs the heuristic first for a
+  fast warm bound, then the exact solver when the problem is a normal size
+  (`len(items) * upper_bound <= 40000`), otherwise returns the heuristic. Everything
+  is **deterministic** (seeded) so the same input always gives the same plan.
+  Supports: weight cap, safety margin (kg or %), max items per bin, keep-groups.
+  Running `python3 solver_core.py` self-tests on the drum shipment and must print
+  **17 bins @ 21,500** and **16 bins @ 21,772**, all 81 items placed, none over cap.
+- **`streamlit_app.py`** — the web app the dad uses. Editable drum table (or CSV
+  upload), truck limit with kg/lb/tonne unit, optional safety margin / max-drums /
+  keep-together, a Calculate button, per-truck result cards with fill bars, and
+  CSV + Excel download. Styled to match the offline HTML tool. Built entirely on
+  `solver_core.optimize`.
+- **`Truck_Loading_Planner.html`** — standalone offline browser tool (same idea,
+  pure-JS heuristic, no install/internet). Reference / backup for field use.
+- **`drum_truck_planner.py`** — original exact CLI (edit the DRUMS list + caps, run).
+- **`example_drums.csv`** — sample input for the app (Description, Weight_kg, Qty).
+- **`Drum_Truck_Loading_Plan.xlsx`** — example output (16- and 17-truck plans).
+- **`requirements.txt`** — streamlit, pandas, ortools, openpyxl.
+
+## Run locally
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py     # opens in browser
+python3 solver_core.py             # regression self-test
+```
+
+## Deploy (free, hosted URL)
+Push this folder to a GitHub repo → https://share.streamlit.io → New app → select
+the repo, main file `streamlit_app.py`. `requirements.txt` installs everything.
+
+## Constraints that matter
+- **Scope is trucks/drums only** — do not generalise it into an abstract multi-problem
+  tool; keep the wording and UI drum/truck-specific.
+- **Streamlit Community Cloud = 1 GB RAM.** Not a limiter here (models are a few MB).
+  Keep the exact-model size cap and heuristic fallback so it stays fast and in-memory;
+  the only thing that grows with input size is solve time, bounded by the UI slider.
+- **Every plan must place all items and never exceed the usable cap** (capacity minus
+  safety margin). Preserve this guarantee in any change.
+- **Keep it deterministic** — no unseeded randomness.
+
+## Known-good numbers (regression)
+81 drums, total 343,269 kg → 17 trucks @ 21,500 kg cap, 16 trucks @
+21,772 kg (48,000 lb) cap. Heaviest truck in the 16-plan: 21,749 kg (47,948 lb).

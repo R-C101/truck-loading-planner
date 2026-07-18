@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Truck Loading Planner</title>
+<style>
+  :root{
+    --ink:#1b2a32; --muted:#5a6b74; --line:#d7e0e5; --bg:#f4f7f9;
+    --brand:#1f4e5f; --brand2:#2b6b80; --accent:#c0522e; --ok:#1c7c54; --warn:#b23b3b;
+    --card:#ffffff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Arial,Helvetica,sans-serif;color:var(--ink);background:var(--bg);line-height:1.45}
+  header{background:var(--brand);color:#fff;padding:22px 26px}
+  header h1{margin:0;font-size:22px}
+  header p{margin:6px 0 0;font-size:13px;color:#cfe0e6;max-width:820px}
+  .wrap{max-width:1000px;margin:0 auto;padding:22px 20px 60px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:16px 0;box-shadow:0 1px 2px rgba(0,0,0,.03)}
+  h2{font-size:16px;margin:0 0 4px;color:var(--brand)}
+  .hint{font-size:12.5px;color:var(--muted);margin:0 0 14px}
+  table.grid{width:100%;border-collapse:collapse}
+  table.grid th,table.grid td{border:1px solid var(--line);padding:7px 8px;font-size:14px;text-align:center}
+  table.grid th{background:#eef3f5;color:var(--brand);font-size:12.5px}
+  table.grid td input{width:100%;border:1px solid transparent;background:transparent;font-size:14px;text-align:center;padding:5px;border-radius:5px;font-family:inherit}
+  table.grid td input:focus{border-color:var(--brand2);background:#fff;outline:none}
+  td.lbl input{text-align:left}
+  .rm{cursor:pointer;color:var(--warn);font-weight:bold;border:none;background:none;font-size:16px}
+  .btn{cursor:pointer;border:none;border-radius:7px;padding:9px 16px;font-size:14px;font-weight:bold;font-family:inherit}
+  .btn.primary{background:var(--accent);color:#fff}
+  .btn.ghost{background:#eef3f5;color:var(--brand)}
+  .btn.sm{padding:6px 12px;font-size:13px}
+  .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+  .opts{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:640px){.opts{grid-template-columns:1fr}}
+  .field label{display:block;font-size:13px;font-weight:bold;margin-bottom:5px}
+  .field .sub{font-weight:normal;color:var(--muted);font-size:12px}
+  .field input[type=number],.field select{padding:8px;border:1px solid var(--line);border-radius:6px;font-size:14px;font-family:inherit}
+  .inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .chk{display:flex;gap:9px;align-items:flex-start;font-size:13.5px}
+  .chk input{margin-top:2px}
+  .calcbar{text-align:center;margin:22px 0}
+  .calcbar .btn{font-size:16px;padding:13px 34px}
+  .tiles{display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 6px}
+  .tile{flex:1;min-width:150px;background:#eef3f5;border-radius:9px;padding:12px 14px;text-align:center}
+  .tile .n{font-size:26px;font-weight:bold;color:var(--brand)}
+  .tile .k{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+  .truck{border:1px solid var(--line);border-radius:9px;margin:12px 0;overflow:hidden}
+  .truck .top{display:flex;justify-content:space-between;align-items:center;background:var(--brand);color:#fff;padding:9px 14px;font-size:14px;flex-wrap:wrap;gap:6px}
+  .truck .top b{font-size:15px}
+  .truck .bar{height:8px;background:#e3ebee}
+  .truck .bar span{display:block;height:100%;background:var(--brand2)}
+  .truck .bar span.full{background:var(--accent)}
+  .truck table{width:100%;border-collapse:collapse}
+  .truck td,.truck th{border-bottom:1px solid var(--line);padding:6px 14px;font-size:13.5px;text-align:left}
+  .truck th{background:#f7fafb;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.3px}
+  .truck td.r,.truck th.r{text-align:right}
+  .msg{padding:11px 14px;border-radius:8px;font-size:14px;margin:10px 0}
+  .msg.err{background:#fbeaea;color:var(--warn);border:1px solid #eec5c5}
+  .msg.ok{background:#e8f4ee;color:var(--ok);border:1px solid #bfe0cd}
+  .foot{font-size:12px;color:var(--muted);text-align:center;margin-top:24px}
+  @media print{
+    header,.no-print{display:none!important}
+    body{background:#fff}
+    .card{border:none;box-shadow:none;padding:0;margin:10px 0}
+    .truck{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Truck Loading Planner</h1>
+  <p>Type in this shipment's drums and the truck's weight limit, then press Calculate. The tool works out the fewest trucks and exactly which drums go on each one. Works offline — nothing is sent anywhere. No internet needed.</p>
+</header>
+
+<div class="wrap">
+
+  <!-- STEP 1: DRUMS -->
+  <div class="card no-print">
+    <h2>Step 1 &nbsp;·&nbsp; The drums in this shipment</h2>
+    <p class="hint">One row per drum type. "Weight (kg)" is the gross weight of a single drum. "Qty" is how many of that drum you have. Use the buttons below to add or remove rows.</p>
+    <table class="grid" id="drumTable">
+      <thead>
+        <tr><th style="width:42%">Description (optional)</th><th style="width:24%">Weight of ONE drum (kg)</th><th style="width:24%">Qty (how many)</th><th style="width:10%"></th></tr>
+      </thead>
+      <tbody id="drumBody"></tbody>
+    </table>
+    <div class="btnrow">
+      <button class="btn ghost sm" onclick="addRow()">+ Add drum row</button>
+      <button class="btn ghost sm" onclick="loadExample()">Load example</button>
+      <button class="btn ghost sm" onclick="clearRows()">Clear all rows</button>
+    </div>
+  </div>
+
+  <!-- STEP 2: TRUCK + OPTIONS -->
+  <div class="card no-print">
+    <h2>Step 2 &nbsp;·&nbsp; Truck limit &amp; options</h2>
+    <p class="hint">Set the truck's maximum load. The three options below are optional — leave them off to plan on weight alone.</p>
+    <div class="opts">
+      <div class="field">
+        <label>Truck weight limit</label>
+        <div class="inline">
+          <input type="number" id="capVal" value="21500" min="1" step="1" style="width:130px">
+          <select id="capUnit">
+            <option value="kg" selected>kg</option>
+            <option value="lb">lb (pounds)</option>
+            <option value="t">tonnes</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Safety margin <span class="sub">— load only up to below the limit</span></label>
+        <div class="inline">
+          <input type="number" id="marginVal" value="0" min="0" step="1" style="width:110px">
+          <select id="marginUnit">
+            <option value="kg" selected>kg below limit</option>
+            <option value="pct">% below limit</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="chk"><input type="checkbox" id="optMaxDrums"><span>Limit drums per truck <span class="sub">(bed-space limit)</span></span></label>
+        <div class="inline" style="margin-top:6px">
+          <span class="sub">Max</span>
+          <input type="number" id="maxDrums" value="10" min="1" step="1" style="width:80px" disabled>
+          <span class="sub">drums per truck</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="chk"><input type="checkbox" id="optKeep"><span>Keep drum types together where possible <span class="sub">(avoid splitting one drum size across many trucks)</span></span></label>
+      </div>
+    </div>
+  </div>
+
+  <div class="calcbar no-print">
+    <button class="btn primary" onclick="run()">Calculate loading plan</button>
+  </div>
+
+  <div id="out"></div>
+
+  <div class="foot no-print">Truck Loading Planner · runs entirely in your browser · press Ctrl/Cmd+P to print or save the plan as PDF</div>
+</div>
+
+<script>
+// ---------- helpers ----------
+const $ = id => document.getElementById(id);
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const LB = 2.20462262;
+
+function addRow(desc='', wt='', qty=''){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td class="lbl"><input placeholder="e.g. 88x40x45 drum" value="${desc}"></td>
+    <td><input type="number" min="0" step="0.01" placeholder="kg" value="${wt}"></td>
+    <td><input type="number" min="0" step="1" placeholder="qty" value="${qty}"></td>
+    <td><button class="rm" title="remove row" onclick="this.closest('tr').remove()">&times;</button></td>`;
+  $('drumBody').appendChild(tr);
+}
+function clearRows(){ $('drumBody').innerHTML=''; }
+function loadExample(){
+  clearRows();
+  const ex = [
+    ['72x40x36 drum',1656,6],['72x40x36 drum',2347,3],['72x40x36 drum',2510,6],
+    ['78x40x45 drum',3469,12],['78x40x45 drum',3550,6],['78x40x45 drum',4038,3],
+    ['88x40x40 drum',4484,6],['88x40x40 drum',4565,6],['88x40x40 drum',5134,12],
+    ['88x40x45 drum',5728,21]
+  ];
+  ex.forEach(r=>addRow(r[0],r[1],r[2]));
+}
+
+$('optMaxDrums').addEventListener('change',e=>{ $('maxDrums').disabled=!e.target.checked; });
+
+// ---------- packing ----------
+// Standalone bin-packing (no external library). Combines several classic
+// heuristics with seeded random restarts + a local-improvement pass, and keeps
+// the best result. Seeded => same input always gives the same plan (repeatable).
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+
+function firstFit(order,cap,maxDrums){
+  const trucks=[];
+  for(const it of order){let placed=false;
+    for(const t of trucks){if(t.load+it.w<=cap+1e-6&&(!maxDrums||t.items.length<maxDrums)){t.items.push(it);t.load+=it.w;placed=true;break;}}
+    if(!placed)trucks.push({items:[it],load:it.w});}
+  return trucks;
+}
+function bestFit(order,cap,maxDrums,typeRank){
+  const trucks=[];
+  for(const it of order){let best=-1,bScore=-Infinity;
+    for(let i=0;i<trucks.length;i++){const t=trucks[i];const rem=cap-(t.load+it.w);
+      if(rem< -1e-6)continue; if(maxDrums&&t.items.length>=maxDrums)continue;
+      let score=-rem;
+      if(typeRank&&t.types&&t.types.has(it.type))score+=cap*2; // pull same types together
+      if(score>bScore){bScore=score;best=i;}}
+    if(best<0)trucks.push({items:[it],load:it.w,types:new Set([it.type])});
+    else{const t=trucks[best];t.items.push(it);t.load+=it.w;if(t.types)t.types.add(it.type);}}
+  return trucks;
+}
+// dissolve the lightest truck by relocating its drums into others; repeat
+function improve(trucks,cap,maxDrums){
+  let changed=true;
+  while(changed){changed=false;
+    trucks.sort((a,b)=>a.load-b.load);
+    for(const src of trucks){
+      const targets=trucks.filter(t=>t!==src);
+      const tmpLoad=targets.map(t=>t.load),tmpCnt=targets.map(t=>t.items.length),moved=[];let ok=true;
+      for(const it of src.items){let done=false;
+        for(let j=0;j<targets.length;j++){if(tmpLoad[j]+it.w<=cap+1e-6&&(!maxDrums||tmpCnt[j]<maxDrums)){tmpLoad[j]+=it.w;tmpCnt[j]++;moved.push([it,targets[j]]);done=true;break;}}
+        if(!done){ok=false;break;}}
+      if(ok&&src.items.length>0){for(const[it,t]of moved){t.items.push(it);t.load+=it.w;}
+        src.items=[];src.load=0;trucks.splice(trucks.indexOf(src),1);changed=true;break;}
+    }
+  }
+  return trucks;
+}
+function clone(sol){return sol.map(t=>({items:t.items.slice(),load:t.load}));}
+
+function plan(items, cap, maxDrums, keep, typeRank){
+  const strat=[];
+  if(keep){
+    const byType=items.slice().sort((a,b)=> a.type!==b.type ? (typeRank[a.type]-typeRank[b.type]) : (b.w-a.w));
+    strat.push(bestFit(byType,cap,maxDrums,typeRank));
+    strat.push(firstFit(byType,cap,maxDrums));
+  } else {
+    strat.push(firstFit(items.slice().sort((a,b)=>b.w-a.w),cap,maxDrums));
+    strat.push(firstFit(items.slice().sort((a,b)=>a.w-b.w),cap,maxDrums));
+    strat.push(bestFit(items.slice().sort((a,b)=>b.w-a.w),cap,maxDrums));
+    const rng=mulberry32(987654321);
+    const N=items.length<=200?800:200;
+    for(let k=0;k<N;k++){const arr=items.slice();
+      for(let i=arr.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[arr[i],arr[j]]=[arr[j],arr[i]];}
+      strat.push(firstFit(arr,cap,maxDrums));}
+  }
+  let best=null;
+  for(let sol of strat){
+    sol=improve(clone(sol),cap,maxDrums);
+    if(!best||sol.length<best.length||(sol.length===best.length&&Math.max(...sol.map(t=>t.load))<Math.max(...best.map(t=>t.load))))best=sol;
+  }
+  return best;
+}
+
+// ---------- run ----------
+function run(){
+  const out=$('out'); out.innerHTML='';
+  // read drums
+  const rows=[...$('drumBody').querySelectorAll('tr')];
+  const items=[]; const typeRank={}; let rank=0; const meta={};
+  let heaviest=0;
+  for(const r of rows){
+    const ins=r.querySelectorAll('input');
+    const desc=(ins[0].value||'').trim();
+    const w=parseFloat(ins[1].value);
+    const q=parseInt(ins[2].value);
+    if(!w||!q||w<=0||q<=0) continue;
+    const type = (desc||'drum')+'|'+w;          // same description + weight = same type
+    if(!(type in typeRank)){ typeRank[type]=rank++; meta[type]={desc:desc||'Drum', w}; }
+    for(let i=0;i<q;i++) items.push({w,type,desc:desc||'Drum'});
+    heaviest=Math.max(heaviest,w);
+  }
+  if(items.length===0){ out.innerHTML='<div class="msg err">Please enter at least one drum row with a weight and a quantity. (Tip: press "Load example" to see how it works.)</div>'; return; }
+
+  // cap
+  let cap=parseFloat($('capVal').value)||0;
+  const cu=$('capUnit').value;
+  if(cu==='lb') cap*=(1/LB); else if(cu==='t') cap*=1000;      // -> kg
+  const rawCap=cap;
+  // margin
+  let mv=parseFloat($('marginVal').value)||0;
+  if($('marginUnit').value==='pct') cap = cap*(1-mv/100); else cap = cap-mv;
+  const effCap=cap;
+
+  const maxDrums = $('optMaxDrums').checked ? (parseInt($('maxDrums').value)||0) : 0;
+  const keep = $('optKeep').checked;
+
+  // validate
+  if(effCap<=0){ out.innerHTML='<div class="msg err">The safety margin is larger than the truck limit — nothing can be loaded. Reduce the margin.</div>'; return; }
+  if(heaviest>effCap+1e-6){
+    out.innerHTML=`<div class="msg err">At least one drum weighs ${fmt(heaviest)} kg, which is more than a truck's usable limit of ${fmt(effCap)} kg. That drum can't fit — check the weight or the truck limit.</div>`; return;
+  }
+
+  const trucks=plan(items,effCap,maxDrums,keep,typeRank);
+  const totalW=items.reduce((s,i)=>s+i.w,0);
+
+  // ---- render summary ----
+  let html='<div class="card">';
+  html+='<h2>Loading plan</h2>';
+  let capLine=`Truck limit ${fmt(rawCap)} kg`;
+  if(effCap<rawCap-0.5) capLine+=` &nbsp;·&nbsp; usable after margin ${fmt(effCap)} kg`;
+  if(maxDrums) capLine+=` &nbsp;·&nbsp; max ${maxDrums} drums/truck`;
+  if(keep) capLine+=` &nbsp;·&nbsp; keeping types together`;
+  html+=`<p class="hint">${capLine}</p>`;
+  html+='<div class="tiles">'
+      +`<div class="tile"><div class="n">${trucks.length}</div><div class="k">Trucks needed</div></div>`
+      +`<div class="tile"><div class="n">${fmt(items.length)}</div><div class="k">Total drums</div></div>`
+      +`<div class="tile"><div class="n">${fmt(totalW)}</div><div class="k">Total kg</div></div>`
+      +`<div class="tile"><div class="n">${fmt(totalW*LB)}</div><div class="k">Total lb</div></div>`
+      +'</div>';
+  html+=`<div class="msg ok">All ${items.length} drums placed across ${trucks.length} trucks. No truck exceeds ${fmt(effCap)} kg.</div>`;
+  html+='<div class="btnrow no-print"><button class="btn ghost sm" onclick="window.print()">Print / Save as PDF</button><button class="btn ghost sm" onclick="downloadCSV()">Download as CSV</button></div>';
+  html+='</div>';
+
+  // ---- render each truck ----
+  window._csv=[['Truck','Description','Weight per drum (kg)','Qty','Line weight (kg)']];
+  trucks.forEach((t,ti)=>{
+    // group items by type for readability
+    const g={};
+    t.items.forEach(it=>{ g[it.type]=g[it.type]||{desc:it.desc,w:it.w,q:0}; g[it.type].q++; });
+    const pct=Math.min(100,t.load/effCap*100);
+    html+='<div class="truck"><div class="top">'
+        +`<b>Truck ${ti+1}</b>`
+        +`<span>${fmt(t.load)} kg &nbsp;/&nbsp; ${fmt(t.load*LB)} lb &nbsp;·&nbsp; ${t.items.length} drums &nbsp;·&nbsp; ${pct.toFixed(0)}% full</span>`
+        +'</div>';
+    html+=`<div class="bar"><span class="${pct>97?'full':''}" style="width:${pct}%"></span></div>`;
+    html+='<table><thead><tr><th>Description</th><th class="r">Weight/drum (kg)</th><th class="r">Qty</th><th class="r">Line (kg)</th></tr></thead><tbody>';
+    Object.values(g).sort((a,b)=>b.w-a.w).forEach(x=>{
+      html+=`<tr><td>${x.desc}</td><td class="r">${fmt(x.w)}</td><td class="r">${x.q}</td><td class="r">${fmt(x.w*x.q)}</td></tr>`;
+      window._csv.push([ti+1,x.desc,Math.round(x.w),x.q,Math.round(x.w*x.q)]);
+    });
+    html+='</tbody></table></div>';
+  });
+
+  out.innerHTML=html;
+  out.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function downloadCSV(){
+  if(!window._csv) return;
+  const csv=window._csv.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob=new Blob([csv],{type:'text/csv'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download='truck_loading_plan.csv'; a.click();
+}
+
+// start with the example loaded so it's obvious how to use
+loadExample();
+</script>
+</body>
+</html>
