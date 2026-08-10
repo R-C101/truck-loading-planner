@@ -7,3 +7,8 @@ _to_delete/
 # sensitive shipment data — keep out of the public repo
 Drum_Truck_Loading_Plan.xlsx
 example_drums.csv
+
+# shipment data / photos — keep out of the public repo
+sample2.xlsx
+*.JPG
+*.jpg

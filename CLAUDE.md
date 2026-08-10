@@ -10,12 +10,17 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
 
 ## Files
 - **`solver_core.py`** — the engine, no UI. `optimize(items, capacity, ...)` packs
-  weighted items into bins, minimising bin count. Two engines: exact OR-tools
-  CP-SAT (proves the minimum) and a pure-Python heuristic (best/first-fit-decreasing
-  + seeded random restarts + local improvement). It runs the heuristic first for a
-  fast warm bound, then the exact solver when the problem is a normal size
-  (`len(items) * upper_bound <= 40000`), otherwise returns the heuristic. Everything
+  weighted items into bins, minimising bin count. Three engines: exact CP-SAT over
+  **truck patterns** (preferred — collapses identical drums, so proofs are usually
+  instant), exact CP-SAT **per item** (fallback for many distinct weights, only when
+  `len(items) * upper_bound <= 40000`), and a pure-Python heuristic
+  (best/first-fit-decreasing + seeded random restarts + local improvement). It runs
+  the heuristic first for a fast warm bound, short-circuits to `exact-optimal` when
+  that already meets the weight/count lower bound, otherwise proves it. Everything
   is **deterministic** (seeded) so the same input always gives the same plan.
+  ⚠️ CP-SAT runs with `num_search_workers = 1` **on purpose**: multi-worker is
+  non-deterministic and, on ortools 9.15 / Python 3.14, ignores the time limit and
+  hangs forever. Do not raise it.
   Supports: weight cap, safety margin (kg or %), max items per bin, keep-groups.
   Running `python3 solver_core.py` self-tests on the drum shipment and must print
   **17 bins @ 21,500** and **16 bins @ 21,772**, all 81 items placed, none over cap.

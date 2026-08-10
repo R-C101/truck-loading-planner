@@ -4,9 +4,14 @@ solver_core.py  —  general "pack items into bins by weight" optimiser.
 Designed for loading problems (drums onto trucks) but generic: any items with a
 weight, packed into bins with a capacity, minimising the number of bins.
 
-Two engines:
-  * EXACT  — OR-tools CP-SAT, proves the minimum number of bins. Used for
-             small/medium problems (fast, low memory — fine on a 1 GB host).
+Three engines:
+  * EXACT (pattern) — OR-tools CP-SAT over legal *truck patterns* rather than
+             individual drums. Shipments have few distinct weights but many
+             drums each, so this collapses identical drums into one count and
+             the proof is usually instant. Preferred exact engine.
+  * EXACT (per-item) — the classic one-variable-per-drum CP-SAT model. Only a
+             fallback, for inputs with too many distinct weights to enumerate
+             patterns. Slow on shipments with many identical drums (symmetry).
   * HEURISTIC — best/first-fit-decreasing + seeded random restarts + a local
              improvement pass. Used as a fast warm-start, as a fallback if
              OR-tools isn't installed, and automatically for very large inputs
@@ -126,7 +131,101 @@ def _heuristic(items, cap, max_items, keep, restarts=800):
 
 
 # ----------------------------------------------------------------------
-# exact engine (OR-tools CP-SAT)
+# exact engine A — pattern / column model (OR-tools CP-SAT)
+#
+# Real shipments have few DISTINCT drum weights but many drums of each
+# (e.g. 133 drums, 7 weights, 63 of them identical). Modelling one variable
+# per drum makes every re-labelling of identical drums a separate solution,
+# so the proof drowns in symmetry. Instead enumerate every legal *truck
+# pattern* ("2 x 8065", "2 x 6491 + 1 x 8065", ...) and just decide how many
+# trucks of each pattern to run. Identical drums collapse into one number,
+# the symmetry disappears, and the proof is typically instant.
+# ----------------------------------------------------------------------
+class _TooManyPatterns(Exception):
+    pass
+
+
+def _gen_patterns(weights, counts, cap, max_items, limit=200_000):
+    """Every multiset of drum weights that legally fills one bin.
+
+    Returned as tuples of per-weight counts, aligned with `weights`.
+    Returns None if the enumeration would be too big to be worth it (many
+    distinct weights and/or tiny items relative to the cap).
+    """
+    d = len(weights)
+    out, cur = [], [0] * d
+
+    def dfs(i, load, n):
+        if len(out) > limit:
+            raise _TooManyPatterns
+        if i == d:
+            if n:                                   # skip the empty truck
+                out.append(tuple(cur))
+            return
+        w = weights[i]
+        k_max = counts[i]
+        if max_items:
+            k_max = min(k_max, max_items - n)
+        while k_max > 0 and load + k_max * w > cap + 1e-6:
+            k_max -= 1                              # capacity prune
+        for k in range(k_max + 1):
+            cur[i] = k
+            dfs(i + 1, load + k * w, n + k)
+        cur[i] = 0
+
+    try:
+        dfs(0, 0.0, 0)
+    except _TooManyPatterns:
+        return None
+    return out
+
+
+def _exact_patterns(items, cap, max_items, upper_bound, time_limit):
+    """Prove the minimum number of bins via the pattern model."""
+    counter = {}
+    for it in items:
+        counter[it["weight"]] = counter.get(it["weight"], 0) + 1
+    weights = sorted(counter)
+    counts = [counter[w] for w in weights]
+
+    pats = _gen_patterns(weights, counts, cap, max_items)
+    if not pats:
+        return None, None
+
+    model = cp_model.CpModel()
+    # x[p] = how many trucks are loaded with pattern p
+    x = [model.NewIntVar(0, upper_bound, f"p{i}") for i in range(len(pats))]
+    for j in range(len(weights)):                   # ship exactly what we have
+        model.Add(sum(pats[i][j] * x[i] for i in range(len(pats))) == counts[j])
+    model.Add(sum(x) <= upper_bound)                # never worse than the heuristic
+    model.Minimize(sum(x))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = float(time_limit)
+    # NOTE: single worker on purpose. Multi-worker CP-SAT is non-deterministic
+    # (breaks the "same input -> same plan" guarantee) and, on this ortools/
+    # Python build, it also ignores max_time_in_seconds and runs forever.
+    solver.parameters.num_search_workers = 1
+    st = solver.Solve(model)
+    if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None, None
+
+    # hand the actual item dicts back out, grouped by weight
+    pool = {w: [it for it in items if it["weight"] == w] for w in weights}
+    bins = []
+    for i, p in enumerate(pats):
+        for _ in range(solver.Value(x[i])):
+            b = {"items": [], "load": 0.0}
+            for j, w in enumerate(weights):
+                for _ in range(p[j]):
+                    it = pool[w].pop()
+                    b["items"].append(it); b["load"] += it["weight"]
+            bins.append(b)
+    return bins, ("exact-optimal" if st == cp_model.OPTIMAL else "exact-feasible")
+
+
+# ----------------------------------------------------------------------
+# exact engine B — one variable per item (fallback for many distinct weights)
 # ----------------------------------------------------------------------
 def _exact(items, cap, max_items, upper_bound, time_limit):
     n = len(items)
@@ -147,7 +246,10 @@ def _exact(items, cap, max_items, upper_bound, time_limit):
     model.Minimize(sum(y))
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_limit)
-    solver.parameters.num_search_workers = 8
+    # NOTE: single worker on purpose. Multi-worker CP-SAT is non-deterministic
+    # (breaks the "same input -> same plan" guarantee) and, on this ortools/
+    # Python build, it also ignores max_time_in_seconds and runs forever.
+    solver.parameters.num_search_workers = 1
     st = solver.Solve(model)
     if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         bins = [{"items": [], "load": 0.0} for _ in range(B)]
@@ -209,13 +311,20 @@ def optimize(items, capacity, max_items_per_bin=None, keep_groups=False,
 
     use_exact = force == "exact" or (
         force != "heuristic" and _HAS_ORTOOLS and not keep_groups
-        and len(items) * ub <= 40000        # keep the model small -> low RAM/time
     )
-    if use_exact:
+    if use_exact and _HAS_ORTOOLS:
         # There's a gap the heuristic couldn't close. Give the exact solver a
         # bounded budget to try to beat it; if it can't in time, return the
         # heuristic answer (already strong) rather than making the user wait.
-        bins, engine = _exact(items, cap, max_items_per_bin, ub, time_limit)
+        #
+        # Prefer the pattern model — identical drums collapse into a single
+        # count, so the symmetry that stalls the per-item model disappears.
+        # It returns None when there are too many distinct weights to
+        # enumerate; only then fall back to the per-item model, and only if
+        # that one is small enough to stay fast and in-memory.
+        bins, engine = _exact_patterns(items, cap, max_items_per_bin, ub, time_limit)
+        if bins is None and len(items) * ub <= 40000:
+            bins, engine = _exact(items, cap, max_items_per_bin, ub, time_limit)
         if bins is not None and len(bins) < ub:
             result["bins"] = [b["items"] for b in bins]; result["engine"] = engine
             return result
