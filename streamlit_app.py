@@ -155,10 +155,11 @@ if go:
                f"No truck exceeds {res['capacity_used']:,.0f} kg. "
                f"Solved in {elapsed:.2f} s.")
 
-    rows = []
+    rows, summary = [], []
     for ti, b in enumerate(bins, 1):
         load = sum(i["weight"] for i in b)
         pct = min(100, load / res["capacity_used"] * 100)
+        spare = res["capacity_used"] - load
         g = {}
         for it in b:
             k = (it["label"], it["weight"]); g[k] = g.get(k, 0) + 1
@@ -173,16 +174,28 @@ if go:
              for k, v in sorted(g.items(), key=lambda kv: -kv[0][1])])
         st.dataframe(df, use_container_width=True, hide_index=True)
         for k, v in g.items():
-            rows.append({"Truck": ti, "Description": k[0], "Weight_kg": k[1],
-                         "Qty": v, "Line_kg": k[1]*v})
+            rows.append({"Truck": ti, "Item": k[0], "Weight_kg": k[1],
+                         "Qty": v, "Line_kg": k[1]*v,
+                         "Truck_Total_kg": round(load, 1),
+                         "Truck_Total_lb": round(load*LB, 1),
+                         "Truck_Drums": len(b),
+                         "Truck_Percent_Full": round(pct, 1)})
+        summary.append({"Truck": ti,
+                        "Total_kg": round(load, 1),
+                        "Total_lb": round(load*LB, 1),
+                        "Drums": len(b),
+                        "Percent_Full": round(pct, 1),
+                        "Spare_capacity_kg": round(spare, 1)})
 
     plan_df = pd.DataFrame(rows)
+    summary_df = pd.DataFrame(summary)
     d1, d2 = st.columns(2)
     d1.download_button("⬇ Download plan (CSV)", plan_df.to_csv(index=False).encode(),
                        "loading_plan.csv", "text/csv", use_container_width=True)
     xbuf = io.BytesIO()
     with pd.ExcelWriter(xbuf, engine="openpyxl") as xw:
         plan_df.to_excel(xw, index=False, sheet_name="Loading Plan")
+        summary_df.to_excel(xw, index=False, sheet_name="Truck Summary")
     d2.download_button("⬇ Download plan (Excel)", xbuf.getvalue(),
                        "loading_plan.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
