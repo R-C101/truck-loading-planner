@@ -189,13 +189,37 @@ if go:
 
     plan_df = pd.DataFrame(rows)
     summary_df = pd.DataFrame(summary)
+
+    # what was shipped: one row per drum type, so the totals can be checked
+    # against the original packing list at a glance
+    types = {}
+    for b in bins:
+        for it in b:
+            k = (it["label"], it["weight"]); types[k] = types.get(k, 0) + 1
+    drum_rows = [{"Item": k[0], "Weight_kg": k[1], "Qty": v,
+                  "Total_kg": round(k[1]*v, 1), "Total_lb": round(k[1]*v*LB, 1)}
+                 for k, v in sorted(types.items(), key=lambda kv: -kv[0][1])]
+    drum_rows.append({"Item": "TOTAL", "Weight_kg": None,
+                      "Qty": sum(types.values()),
+                      "Total_kg": round(res["total_weight"], 1),
+                      "Total_lb": round(res["total_weight"]*LB, 1)})
+    drum_df = pd.DataFrame(drum_rows)
+
+    st.subheader("3 · Drums shipped (summary)")
+    st.dataframe(drum_df, use_container_width=True, hide_index=True)
+
     d1, d2 = st.columns(2)
-    d1.download_button("⬇ Download plan (CSV)", plan_df.to_csv(index=False).encode(),
+    cbuf = io.StringIO()
+    plan_df.to_csv(cbuf, index=False)
+    cbuf.write("\nTRUCK SUMMARY\n");  summary_df.to_csv(cbuf, index=False)
+    cbuf.write("\nDRUMS SHIPPED\n");  drum_df.to_csv(cbuf, index=False)
+    d1.download_button("⬇ Download plan (CSV)", cbuf.getvalue().encode(),
                        "loading_plan.csv", "text/csv", use_container_width=True)
     xbuf = io.BytesIO()
     with pd.ExcelWriter(xbuf, engine="openpyxl") as xw:
         plan_df.to_excel(xw, index=False, sheet_name="Loading Plan")
         summary_df.to_excel(xw, index=False, sheet_name="Truck Summary")
+        drum_df.to_excel(xw, index=False, sheet_name="Drums Shipped")
     d2.download_button("⬇ Download plan (Excel)", xbuf.getvalue(),
                        "loading_plan.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
