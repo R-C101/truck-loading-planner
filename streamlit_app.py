@@ -66,11 +66,11 @@ with st.sidebar:
     max_n = st.number_input("Max drums per truck", min_value=1, value=10, step=1, disabled=not use_maxn)
 
     keep = st.checkbox("Keep drum types together where possible")
-    prove = st.checkbox("Prove it's the fewest possible trucks (slower)", value=False)
-    time_limit = st.slider("Max proof time (seconds)", 3, 60, 5, disabled=not prove)
-    st.caption("The plan is found almost instantly and is the same either way. "
-               "Tick *Prove* only if you want a mathematical guarantee that no truck "
-               "can be saved on tight loads — that proof is the slow part.")
+    prove = st.checkbox("Prove it's the fewest possible trucks", value=True)
+    time_limit = st.slider("Max proof time (seconds)", 3, 60, 10, disabled=not prove)
+    st.caption("Leave this ticked. The proof is normally instant and it's what lets "
+               "the app say the truck count can't be beaten. On an awkward load it "
+               "stops at the time limit and returns the best plan it found.")
 
 # ---------------- step 1: items ----------------
 st.subheader("1 · Drums in this shipment")
@@ -114,8 +114,8 @@ if go:
         st.stop()
 
     cap_kg = to_kg(cap_val, cap_unit)
-    spin_msg = (f"Optimising… (plan is instant; may spend up to {int(time_limit)}s "
-                f"proving the fewest-possible trucks)" if prove
+    spin_msg = (f"Optimising and proving the fewest possible trucks… "
+                f"(stops after {int(time_limit)}s on an awkward load)" if prove
                 else "Optimising… (fast plan, no optimality proof)")
     with st.spinner(spin_msg):
         t0 = time.perf_counter()
