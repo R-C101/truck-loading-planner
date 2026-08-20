@@ -46,9 +46,11 @@ st.markdown("""
 
 DEFAULT = pd.DataFrame({
     "Item":      pd.Series([], dtype="object"),
+    "Container": pd.Series([], dtype="object"),
     "Weight_kg": pd.Series([], dtype="float"),
     "Qty":       pd.Series([], dtype="Int64"),
 })
+COLS = ["Item", "Container", "Weight_kg", "Qty"]
 
 # ---------------- sidebar: truck limit + options ----------------
 with st.sidebar:
@@ -74,15 +76,22 @@ with st.sidebar:
 
 # ---------------- step 1: items ----------------
 st.subheader("1 · Drums in this shipment")
-st.caption("Fill in a row per drum type — its weight (kg), a name, and how many. "
-           "Add rows with ✚, remove with 🗑. Weight is the gross weight of ONE drum. "
-           "Or upload a CSV with columns Weight_kg, Item, Qty.")
+st.caption("One row per drum type per container — the item, the container it comes "
+           "from, the weight of ONE drum (kg), and how many. If the same drum arrives "
+           "in several containers, add a row for each so the container numbers can be "
+           "checked off later. Add rows with ✚, remove with 🗑. Or upload a CSV with "
+           "columns Item, Container, Weight_kg, Qty.")
 up = st.file_uploader("Upload CSV (optional)", type=["csv"], label_visibility="collapsed")
 data = pd.read_csv(up) if up is not None else DEFAULT.copy()
+for _c in COLS:                       # tolerate CSVs without a Container column
+    if _c not in data.columns:
+        data[_c] = None
+data = data[COLS + [c for c in data.columns if c not in COLS]]
 edited = st.data_editor(
     data, num_rows="dynamic", use_container_width=True, hide_index=True, key="grid",
     column_config={
-        "Item": st.column_config.TextColumn("Item", width="large"),
+        "Item": st.column_config.TextColumn("Item", width="medium"),
+        "Container": st.column_config.TextColumn("Container no.", width="medium"),
         "Weight_kg": st.column_config.NumberColumn("Weight (kg)", min_value=0, step=1),
         "Qty": st.column_config.NumberColumn("Quantity", min_value=0, step=1),
     },
@@ -107,8 +116,12 @@ if go:
         if w <= 0 or q <= 0:
             continue
         desc = str(r.get("Item") or r.get("Description") or "drum")
+        cont = r.get("Container")
+        cont = "" if cont is None or pd.isna(cont) else str(cont).strip()
         for _ in range(q):
-            items.append({"weight": w, "label": desc, "group": f"{desc}|{w}"})
+            # container rides along on the item; it never affects the packing
+            items.append({"weight": w, "label": desc, "container": cont,
+                          "group": f"{desc}|{w}"})
     if not items:
         st.error("Please enter at least one row with a weight and a quantity.")
         st.stop()
@@ -162,7 +175,8 @@ if go:
         spare = res["capacity_used"] - load
         g = {}
         for it in b:
-            k = (it["label"], it["weight"]); g[k] = g.get(k, 0) + 1
+            k = (it["label"], it.get("container", ""), it["weight"])
+            g[k] = g.get(k, 0) + 1
         st.markdown(f"""
         <div class="truckcard">
           <div class="top"><b>Truck {ti}</b>
@@ -170,12 +184,13 @@ if go:
           <div class="bar"><span class="{'full' if pct>97 else ''}" style="width:{pct}%"></span></div>
         </div>""", unsafe_allow_html=True)
         df = pd.DataFrame(
-            [{"Description": k[0], "Weight/drum (kg)": k[1], "Qty": v, "Line (kg)": k[1]*v}
-             for k, v in sorted(g.items(), key=lambda kv: -kv[0][1])])
+            [{"Item": k[0], "Container": k[1], "Weight/drum (kg)": k[2],
+              "Qty": v, "Line (kg)": k[2]*v}
+             for k, v in sorted(g.items(), key=lambda kv: (-kv[0][2], kv[0][1]))])
         st.dataframe(df, use_container_width=True, hide_index=True)
         for k, v in g.items():
-            rows.append({"Truck": ti, "Item": k[0], "Weight_kg": k[1],
-                         "Qty": v, "Line_kg": k[1]*v,
+            rows.append({"Truck": ti, "Item": k[0], "Container": k[1],
+                         "Weight_kg": k[2], "Qty": v, "Line_kg": k[2]*v,
                          "Truck_Total_kg": round(load, 1),
                          "Truck_Total_lb": round(load*LB, 1),
                          "Truck_Drums": len(b),
@@ -195,11 +210,12 @@ if go:
     types = {}
     for b in bins:
         for it in b:
-            k = (it["label"], it["weight"]); types[k] = types.get(k, 0) + 1
-    drum_rows = [{"Item": k[0], "Weight_kg": k[1], "Qty": v,
-                  "Total_kg": round(k[1]*v, 1), "Total_lb": round(k[1]*v*LB, 1)}
-                 for k, v in sorted(types.items(), key=lambda kv: -kv[0][1])]
-    drum_rows.append({"Item": "TOTAL", "Weight_kg": None,
+            k = (it["label"], it.get("container", ""), it["weight"])
+            types[k] = types.get(k, 0) + 1
+    drum_rows = [{"Item": k[0], "Container": k[1], "Weight_kg": k[2], "Qty": v,
+                  "Total_kg": round(k[2]*v, 1), "Total_lb": round(k[2]*v*LB, 1)}
+                 for k, v in sorted(types.items(), key=lambda kv: (-kv[0][2], kv[0][1]))]
+    drum_rows.append({"Item": "TOTAL", "Container": None, "Weight_kg": None,
                       "Qty": sum(types.values()),
                       "Total_kg": round(res["total_weight"], 1),
                       "Total_lb": round(res["total_weight"]*LB, 1)})
