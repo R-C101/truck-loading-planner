@@ -238,16 +238,16 @@ def _preview_and_add(parsed, tag):
         return
     drums = int(parsed["Qty"].fillna(0).sum())
     st.caption(f"Read **{len(parsed)} rows**, {drums:,} drums:")
-    st.dataframe(parsed, use_container_width=True, hide_index=True)
+    st.dataframe(parsed, width="stretch", hide_index=True)
     gaps = int(parsed["Weight_kg"].isna().sum() + parsed["Qty"].isna().sum())
     if gaps:
         st.warning(f"{gaps} weight/quantity cell(s) didn't come through as numbers. "
                    f"Add them in the table below after adding these rows.")
     b1, b2 = st.columns(2)
-    if b1.button("➕ Add to table", key=f"add_{tag}", use_container_width=True):
+    if b1.button("➕ Add to table", key=f"add_{tag}", width="stretch"):
         _fill_table(parsed, replace=False)
         st.rerun()
-    if b2.button("↻ Replace table", key=f"rep_{tag}", use_container_width=True):
+    if b2.button("↻ Replace table", key=f"rep_{tag}", width="stretch"):
         _fill_table(parsed, replace=True)
         st.rerun()
 
@@ -296,7 +296,7 @@ if up is not None:
         st.session_state.grid_ver += 1
 
 edited = st.data_editor(
-    st.session_state.table_df, num_rows="dynamic", use_container_width=True,
+    st.session_state.table_df, num_rows="dynamic", width="stretch",
     hide_index=True, key=f"grid_{st.session_state.grid_ver}",
     column_config={
         "Item": st.column_config.TextColumn("Item", width="medium"),
@@ -311,7 +311,7 @@ _ok = edited.dropna(subset=["Weight_kg", "Qty"]) if len(edited) else edited
 if len(_ok):
     st.caption(f"**{len(_ok)} rows · {int(_ok['Qty'].sum()):,} drums · "
                f"{(_ok['Weight_kg'] * _ok['Qty']).sum():,.0f} kg** in the table.")
-if st.columns([1, 3])[0].button("Clear table", use_container_width=True):
+if st.columns([1, 3])[0].button("Clear table", width="stretch"):
     st.session_state.table_df = _normalise(DEFAULT.copy())
     st.session_state.grid_ver += 1
     st.session_state.pop("last_edited", None)
@@ -416,7 +416,7 @@ if go:
             [{"Item": k[0], "Container": k[1], "Weight/drum (kg)": k[2],
               "Qty": v, "Line (kg)": k[2]*v}
              for k, v in sorted(g.items(), key=lambda kv: (-kv[0][2], kv[0][1]))])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         for k, v in g.items():
             rows.append({"Truck": ti, "Item": k[0], "Container": k[1],
                          "Weight_kg": k[2], "Qty": v, "Line_kg": k[2]*v,
@@ -451,7 +451,7 @@ if go:
     drum_df = pd.DataFrame(drum_rows)
 
     st.subheader("3 · Drums shipped (summary)")
-    st.dataframe(drum_df, use_container_width=True, hide_index=True)
+    st.dataframe(drum_df, width="stretch", hide_index=True)
 
     d1, d2 = st.columns(2)
     cbuf = io.StringIO()
@@ -459,7 +459,7 @@ if go:
     cbuf.write("\nTRUCK SUMMARY\n");  summary_df.to_csv(cbuf, index=False)
     cbuf.write("\nDRUMS SHIPPED\n");  drum_df.to_csv(cbuf, index=False)
     d1.download_button("⬇ Download plan (CSV)", cbuf.getvalue().encode(),
-                       "loading_plan.csv", "text/csv", use_container_width=True)
+                       "loading_plan.csv", "text/csv", width="stretch")
     xbuf = io.BytesIO()
     with pd.ExcelWriter(xbuf, engine="openpyxl") as xw:
         plan_df.to_excel(xw, index=False, sheet_name="Loading Plan")
@@ -468,4 +468,4 @@ if go:
     d2.download_button("⬇ Download plan (Excel)", xbuf.getvalue(),
                        "loading_plan.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
+                       width="stretch")
