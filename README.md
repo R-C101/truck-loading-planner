@@ -16,6 +16,8 @@ one truck from a shipment is real money saved.
   fewest trucks mathematically possible when a load is tight.
 - Gives a clear per-truck breakdown — weight, drum count, and how full each
   truck is.
+- Takes the shipment straight out of Excel — paste the cells (or one column at a
+  time) and they fill the table, ready to check and correct before calculating.
 - Same input always produces the same plan.
 
 ## Options

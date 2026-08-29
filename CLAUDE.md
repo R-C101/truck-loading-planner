@@ -24,11 +24,21 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   Supports: weight cap, safety margin (kg or %), max items per bin, keep-groups.
   Running `python3 solver_core.py` self-tests on the drum shipment and must print
   **17 bins @ 21,500** and **16 bins @ 21,772**, all 81 items placed, none over cap.
-- **`streamlit_app.py`** — the web app the dad uses. Editable drum table (or CSV
-  upload), truck limit with kg/lb/tonne unit, optional safety margin / max-drums /
-  keep-together, a Calculate button, per-truck result cards with fill bars, and
-  CSV + Excel download. Styled to match the offline HTML tool. Built entirely on
-  `solver_core.optimize`.
+- **`streamlit_app.py`** — the web app the dad uses. Editable drum table (Item,
+  Container no., Weight, Qty), truck limit with kg/lb/tonne unit, optional safety
+  margin / max-drums / keep-together, a Calculate button, per-truck result cards
+  with fill bars, and CSV + Excel download. Styled to match the offline HTML tool.
+  Built entirely on `solver_core.optimize`.
+  The table is the **single source of truth** — the three ways to fill it (typing,
+  a CSV upload, or an Excel paste) all just write into `st.session_state.table_df`
+  and bump `grid_ver`, whose value is part of the `data_editor` key so the grid
+  redraws instead of layering stale widget edits on top. `parse_block` reads a
+  tab-separated block (header row auto-detected and mapped by name, otherwise
+  columns guessed positionally); `parse_columns` reads one Excel column per box and
+  matches them up row by row, keeping blank lines so rows can't shift. Number
+  parsing is deliberately strict (`_clean_num`) so a container number like
+  `MSKU1234567` is never mistaken for a weight. The container is carried on each
+  item purely as a label and never reaches the model.
 - **`Truck_Loading_Planner.html`** — standalone offline browser tool (same idea,
   pure-JS heuristic, no install/internet). Reference / backup for field use.
 - **`drum_truck_planner.py`** — original exact CLI (edit the DRUMS list + caps, run).
