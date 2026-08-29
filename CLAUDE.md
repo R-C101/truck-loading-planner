@@ -37,8 +37,18 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   columns guessed positionally); `parse_columns` reads one Excel column per box and
   matches them up row by row, keeping blank lines so rows can't shift. Number
   parsing is deliberately strict (`_clean_num`) so a container number like
-  `MSKU1234567` is never mistaken for a weight. The container is carried on each
-  item purely as a label and never reaches the model.
+  `MSKU1234567` is never mistaken for a weight.
+  Two input **modes** (the `BY_TYPE` / `EACH` radio): a row per drum type with a
+  quantity, or a row per individual drum with a `Drum_no` and an implicit quantity
+  of 1. The mode changes which columns the grid shows, how a headerless paste is
+  mapped positionally, and how the handful of ambiguous headings in `_AMBIGUOUS`
+  ("No.", "Sr No.", "ID") are read — quantity by type, drum number drum by drum.
+  Container and drum number are carried on each item purely as labels and never
+  reach the model. Output columns follow the data, not the mode: `has_dno` adds a
+  drum-number column to the truck tables and the Loading Plan only when some drum
+  actually has one, and truck lines only collapse together when they share a drum
+  number (or have none). The Drums Shipped sheet always groups by type/container
+  and ignores drum numbers — it is the summary; the per-drum detail is on the plan.
 - **`Truck_Loading_Planner.html`** — standalone offline browser tool (same idea,
   pure-JS heuristic, no install/internet). Reference / backup for field use.
 - **`drum_truck_planner.py`** — original exact CLI (edit the DRUMS list + caps, run).

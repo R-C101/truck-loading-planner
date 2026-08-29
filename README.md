@@ -18,6 +18,9 @@ one truck from a shipment is real money saved.
   truck is.
 - Takes the shipment straight out of Excel — paste the cells (or one column at a
   time) and they fill the table, ready to check and correct before calculating.
+- Reads the list either way round: a row per drum **type** with a quantity, or a
+  row per **individual drum** with its own drum number. Drum numbers are carried
+  through to the plan, so each drum can be traced to the truck it went on.
 - Same input always produces the same plan.
 
 ## Options

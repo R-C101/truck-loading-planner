@@ -52,10 +52,17 @@ st.markdown("""
 DEFAULT = pd.DataFrame({
     "Item":      pd.Series([], dtype="object"),
     "Container": pd.Series([], dtype="object"),
+    "Drum_no":   pd.Series([], dtype="object"),
     "Weight_kg": pd.Series([], dtype="float"),
     "Qty":       pd.Series([], dtype="Int64"),
 })
-COLS = ["Item", "Container", "Weight_kg", "Qty"]
+COLS = ["Item", "Container", "Drum_no", "Weight_kg", "Qty"]
+
+# Two ways the shipment list turns up. BY_TYPE is the usual one: a row per drum
+# type with a quantity. EACH is when the list is drum by drum, every drum on its
+# own line with its own number — there the quantity is always 1 and never typed.
+BY_TYPE = "By drum type — one row per type, with a quantity"
+EACH = "One row per drum — with drum numbers"
 
 
 # ---------------- reading pasted / uploaded rows ----------------
@@ -70,14 +77,27 @@ _HEADER_MAP = {
     "drumtype": "Item", "type": "Item",
     "container": "Container", "containerno": "Container", "cont": "Container",
     "contno": "Container", "containernumber": "Container", "box": "Container",
+    "drumno": "Drum_no", "drumnumber": "Drum_no", "drumid": "Drum_no",
+    "drumnos": "Drum_no", "serial": "Drum_no", "serialno": "Drum_no",
+    "serialnumber": "Drum_no", "barcode": "Drum_no", "tag": "Drum_no",
     "weight": "Weight_kg", "weightkg": "Weight_kg", "wt": "Weight_kg",
     "kg": "Weight_kg", "kgs": "Weight_kg", "unitweight": "Weight_kg",
     "weightperdrum": "Weight_kg", "grossweight": "Weight_kg",
     "netweight": "Weight_kg", "weightperunit": "Weight_kg",
-    "qty": "Qty", "quantity": "Qty", "nos": "Qty", "no": "Qty", "num": "Qty",
-    "count": "Qty", "pcs": "Qty", "pieces": "Qty", "drums": "Qty",
-    "number": "Qty", "noofdrums": "Qty",
+    "qty": "Qty", "quantity": "Qty", "count": "Qty", "pcs": "Qty",
+    "pieces": "Qty", "drums": "Qty", "noofdrums": "Qty",
 }
+
+# "No." means the quantity on a by-type list and the drum number on a drum-by-drum
+# one, so these few headings can only be read once the mode is known.
+_AMBIGUOUS = ("no", "nos", "num", "number", "sno", "srno", "sr", "id")
+
+
+def _head(cell, each):
+    k = _key(cell)
+    if k in _AMBIGUOUS:
+        return "Drum_no" if each else "Qty"
+    return _HEADER_MAP.get(k)
 
 
 def _key(s):
@@ -102,16 +122,28 @@ def _num(v):
     return float(s) if s is not None else None
 
 
-def _positional(cells):
+def _positional(cells, each):
     """No header row — work out what the columns are from the values."""
     c = list(cells) + [""] * 4
-    if len(cells) >= 4:
+    n = len(cells)
+    if each:
+        # drum by drum: the weight is the last column, the drum number the one
+        # before it, so a short list still lines up from the right
+        if n >= 4:
+            return {"Item": c[0], "Container": c[1], "Drum_no": c[2], "Weight_kg": c[3]}
+        if n == 3:
+            return {"Item": c[0], "Drum_no": c[1], "Weight_kg": c[2]}
+        if n == 2:
+            return ({"Drum_no": c[0], "Weight_kg": c[1]} if _is_num(c[1])
+                    else {"Item": c[0], "Drum_no": c[1]})
+        return {"Weight_kg": c[0]} if _is_num(c[0]) else {"Drum_no": c[0]}
+    if n >= 4:
         return {"Item": c[0], "Container": c[1], "Weight_kg": c[2], "Qty": c[3]}
-    if len(cells) == 3:
+    if n == 3:
         if _is_num(c[1]):                       # item, weight, qty
             return {"Item": c[0], "Weight_kg": c[1], "Qty": c[2]}
         return {"Item": c[0], "Container": c[1], "Weight_kg": c[2]}
-    if len(cells) == 2:
+    if n == 2:
         if _is_num(c[0]) and _is_num(c[1]):     # weight, qty
             return {"Weight_kg": c[0], "Qty": c[1]}
         if _is_num(c[1]):
@@ -120,24 +152,28 @@ def _positional(cells):
     return {"Weight_kg": c[0]} if _is_num(c[0]) else {"Item": c[0]}
 
 
-def _record(rec):
+def _record(rec, each):
     item = str(rec.get("Item") or "").strip()
     cont = str(rec.get("Container") or "").strip()
+    dno = str(rec.get("Drum_no") or "").strip()
     w, q = _num(rec.get("Weight_kg")), _num(rec.get("Qty"))
-    if not item and not cont and w is None and q is None:
+    if not item and not cont and not dno and w is None and q is None:
         return None
+    if each:
+        q = 1                                       # one line = one drum
     return {"Item": item or None, "Container": cont or None,
-            "Weight_kg": w, "Qty": int(q) if q is not None else None}
+            "Drum_no": dno or None, "Weight_kg": w,
+            "Qty": int(q) if q is not None else None}
 
 
-def parse_block(text):
+def parse_block(text, each=False):
     """A block of cells copied from Excel: tab separated, one row per line."""
     lines = [l for l in (text or "").splitlines() if l.strip()]
     if not lines:
         return _normalise(DEFAULT.copy())
     grid = [[c.strip() for c in l.split("\t")] if "\t" in l else [l.strip()]
             for l in lines]
-    head = [_HEADER_MAP.get(_key(c)) for c in grid[0]]
+    head = [_head(c, each) for c in grid[0]]
     if sum(h is not None for h in head) >= 2:       # first line is a header row
         body, cols = grid[1:], head
     else:
@@ -145,8 +181,8 @@ def parse_block(text):
     out = []
     for cells in body:
         rec = ({h: v for h, v in zip(cols, cells) if h} if cols
-               else _positional(cells))
-        r = _record(rec)
+               else _positional(cells, each))
+        r = _record(rec, each)
         if r:
             out.append(r)
     return _normalise(pd.DataFrame(out, columns=COLS))
@@ -160,14 +196,16 @@ def _lines(text):
     return ls
 
 
-def parse_columns(items, conts, weights, qtys):
-    """Each column pasted into its own box; matched up row by row."""
+def parse_columns(items, conts, weights, last, each=False):
+    """Each column pasted into its own box; matched up row by row.
+    `last` is the quantity column normally, the drum numbers drum by drum."""
     cols = {"Item": _lines(items), "Container": _lines(conts),
-            "Weight_kg": _lines(weights), "Qty": _lines(qtys)}
+            "Weight_kg": _lines(weights),
+            ("Drum_no" if each else "Qty"): _lines(last)}
     n = max((len(v) for v in cols.values()), default=0)
     out = []
     for i in range(n):
-        r = _record({k: (v[i] if i < len(v) else "") for k, v in cols.items()})
+        r = _record({k: (v[i] if i < len(v) else "") for k, v in cols.items()}, each)
         if r:
             out.append(r)
     return _normalise(pd.DataFrame(out, columns=COLS))
@@ -180,8 +218,8 @@ def _normalise(df):
         if c not in df.columns:
             df[c] = None
     df = df[COLS + [c for c in df.columns if c not in COLS]]
-    df["Item"] = df["Item"].astype("object")
-    df["Container"] = df["Container"].astype("object")
+    for c in ("Item", "Container", "Drum_no"):
+        df[c] = df[c].astype("object")
     df["Weight_kg"] = pd.to_numeric(df["Weight_kg"], errors="coerce")
     df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce").round().astype("Int64")
     return df.reset_index(drop=True)
@@ -253,24 +291,48 @@ def _preview_and_add(parsed, tag):
 
 
 st.subheader("1 · Drums in this shipment")
-st.caption("One row per drum type per container — the item, the container it comes "
-           "from, the weight of ONE drum (kg), and how many. If the same drum arrives "
-           "in several containers, add a row for each so the container numbers can be "
-           "checked off later. Type into the table, paste from Excel, or upload a CSV — "
-           "then check and fix anything in the table before pressing Calculate.")
+mode = st.radio("How is the list written?", [BY_TYPE, EACH], horizontal=True,
+                key="mode", label_visibility="collapsed")
+each = mode == EACH
+
+# switching mode redraws the grid, so fold anything typed in back into the table
+if st.session_state.get("prev_mode") != mode:
+    if "prev_mode" in st.session_state:
+        st.session_state.table_df = _normalise(_on_screen())
+        st.session_state.grid_ver += 1
+    st.session_state.prev_mode = mode
+
+if each:
+    st.caption("One row per drum — the item, the container it came in, that "
+               "drum's number, and its weight in kg. No quantity needed; every "
+               "row counts as one drum. Type into the table, paste from Excel, "
+               "or upload a CSV, then check it before pressing Calculate.")
+else:
+    st.caption("One row per drum type per container — the item, the container it "
+               "comes from, the weight of ONE drum (kg), and how many. If the same "
+               "drum arrives in several containers, add a row for each so the "
+               "container numbers can be checked off later. Type into the table, "
+               "paste from Excel, or upload a CSV, then check it before pressing "
+               "Calculate.")
 
 with st.expander("📋 Paste from Excel", expanded=False):
     t_block, t_cols = st.tabs(["Paste the whole block", "Paste one column at a time"])
+    order_hint = ("item, container, drum no., weight" if each
+                  else "item, container, weight, quantity")
+    ph = (("drum\tMSKU1234567\tD-0001\t8065\n"
+           "drum\tMSKU1234567\tD-0002\t8065\n"
+           "drum\tTGHU7654321\tD-0003\t6491") if each else
+          ("8065kg drum\tMSKU1234567\t8065\t30\n"
+           "8065kg drum\tTGHU7654321\t8065\t33\n"
+           "6491kg drum\tMSKU1234567\t6491\t12"))
     with t_block:
-        st.caption("Select the cells in Excel, copy, and paste here. A header row is "
-                   "fine — it gets recognised and skipped. Column order: item, "
-                   "container, weight, quantity.")
+        st.caption(f"Select the cells in Excel, copy, and paste here. A header row "
+                   f"is fine — it gets recognised and skipped. Column order: "
+                   f"{order_hint}.")
         blk = st.text_area("Paste cells", height=170, label_visibility="collapsed",
                            key=f"paste_block_{st.session_state.paste_ver}",
-                           placeholder=("8065kg drum\tMSKU1234567\t8065\t30\n"
-                                        "8065kg drum\tTGHU7654321\t8065\t33\n"
-                                        "6491kg drum\tMSKU1234567\t6491\t12"))
-        _preview_and_add(parse_block(blk), "blk")
+                           placeholder=ph)
+        _preview_and_add(parse_block(blk, each), "blk")
     with t_cols:
         st.caption("Copy one Excel column at a time — each value on its own line. "
                    "The boxes are matched up row by row, so paste the same number of "
@@ -281,11 +343,12 @@ with st.expander("📋 Paste from Excel", expanded=False):
         c_cont = q2.text_area("Container no.", height=150, key=f"col_cont_{k}")
         q3, q4 = st.columns(2)
         c_wt = q3.text_area("Weight (kg)", height=150, key=f"col_wt_{k}")
-        c_qty = q4.text_area("Quantity", height=150, key=f"col_qty_{k}")
-        if any("\t" in (t or "") for t in (c_item, c_cont, c_wt, c_qty)):
+        c_last = q4.text_area("Drum no." if each else "Quantity", height=150,
+                              key=f"col_last_{k}")
+        if any("\t" in (t or "") for t in (c_item, c_cont, c_wt, c_last)):
             st.info("That looks like more than one column — the other tab handles "
                     "a whole block in one go.")
-        _preview_and_add(parse_columns(c_item, c_cont, c_wt, c_qty), "cols")
+        _preview_and_add(parse_columns(c_item, c_cont, c_wt, c_last, each), "cols")
 
 up = st.file_uploader("Upload CSV (optional)", type=["csv"], label_visibility="collapsed")
 if up is not None:
@@ -295,22 +358,30 @@ if up is not None:
         st.session_state.table_df = _normalise(pd.read_csv(up))
         st.session_state.grid_ver += 1
 
+shown = ["Item", "Container", "Drum_no", "Weight_kg"] if each else \
+        ["Item", "Container", "Weight_kg", "Qty"]
 edited = st.data_editor(
     st.session_state.table_df, num_rows="dynamic", width="stretch",
-    hide_index=True, key=f"grid_{st.session_state.grid_ver}",
+    hide_index=True, key=f"grid_{int(each)}_{st.session_state.grid_ver}",
+    column_order=shown + [c for c in st.session_state.table_df.columns
+                          if c not in COLS],
     column_config={
         "Item": st.column_config.TextColumn("Item", width="medium"),
         "Container": st.column_config.TextColumn("Container no.", width="medium"),
+        "Drum_no": st.column_config.TextColumn("Drum no.", width="medium"),
         "Weight_kg": st.column_config.NumberColumn("Weight (kg)", min_value=0, step=1),
         "Qty": st.column_config.NumberColumn("Quantity", min_value=0, step=1),
     },
 )
 st.session_state.last_edited = edited
 
-_ok = edited.dropna(subset=["Weight_kg", "Qty"]) if len(edited) else edited
+_ok = edited.dropna(subset=["Weight_kg"]) if len(edited) else edited
+if not each:
+    _ok = _ok.dropna(subset=["Qty"]) if len(_ok) else _ok
 if len(_ok):
-    st.caption(f"**{len(_ok)} rows · {int(_ok['Qty'].sum()):,} drums · "
-               f"{(_ok['Weight_kg'] * _ok['Qty']).sum():,.0f} kg** in the table.")
+    _q = pd.Series(1, index=_ok.index) if each else _ok["Qty"]
+    st.caption(f"**{len(_ok)} rows · {int(_q.sum()):,} drums · "
+               f"{(_ok['Weight_kg'] * _q).sum():,.0f} kg** in the table.")
 if st.columns([1, 3])[0].button("Clear table", width="stretch"):
     st.session_state.table_df = _normalise(DEFAULT.copy())
     st.session_state.grid_ver += 1
@@ -327,7 +398,8 @@ go = st.button("Calculate loading plan", type="primary")
 if go:
     items, skipped = [], 0
     for _, r in edited.iterrows():
-        w = r.get("Weight_kg"); q = r.get("Qty")
+        w = r.get("Weight_kg")
+        q = 1 if each else r.get("Qty")       # drum by drum: a row is one drum
         blank = all(pd.isna(r.get(c)) or str(r.get(c)).strip() == "" for c in COLS)
         if pd.isna(w) or pd.isna(q):
             skipped += 0 if blank else 1      # a part-filled row is a mistake, say so
@@ -343,10 +415,13 @@ if go:
         desc = str(r.get("Item") or r.get("Description") or "drum")
         cont = r.get("Container")
         cont = "" if cont is None or pd.isna(cont) else str(cont).strip()
+        dno = r.get("Drum_no")
+        dno = "" if dno is None or pd.isna(dno) else str(dno).strip()
         for _ in range(q):
-            # container rides along on the item; it never affects the packing
+            # container and drum number ride along on the item purely as labels;
+            # neither ever affects the packing
             items.append({"weight": w, "label": desc, "container": cont,
-                          "group": f"{desc}|{w}"})
+                          "drum_no": dno, "group": f"{desc}|{w}"})
     if not items:
         st.error("Please enter at least one row with a weight and a quantity.")
         st.stop()
@@ -397,6 +472,10 @@ if go:
                f"No truck exceeds {res['capacity_used']:,.0f} kg. "
                f"Solved in {elapsed:.2f} s.")
 
+    # a drum number identifies one physical drum, so rows only collapse together
+    # when they share one (or when there are no drum numbers at all)
+    has_dno = any(it.get("drum_no") for b in bins for it in b)
+
     rows, summary = [], []
     for ti, b in enumerate(bins, 1):
         load = sum(i["weight"] for i in b)
@@ -404,7 +483,8 @@ if go:
         spare = res["capacity_used"] - load
         g = {}
         for it in b:
-            k = (it["label"], it.get("container", ""), it["weight"])
+            k = (it["label"], it.get("container", ""), it.get("drum_no", ""),
+                 it["weight"])
             g[k] = g.get(k, 0) + 1
         st.markdown(f"""
         <div class="truckcard">
@@ -412,14 +492,17 @@ if go:
             <span>{load:,.0f} kg / {load*LB:,.0f} lb · {len(b)} drums · {pct:.0f}% full</span></div>
           <div class="bar"><span class="{'full' if pct>97 else ''}" style="width:{pct}%"></span></div>
         </div>""", unsafe_allow_html=True)
+        lines = sorted(g.items(), key=lambda kv: (-kv[0][3], kv[0][1], kv[0][2]))
         df = pd.DataFrame(
-            [{"Item": k[0], "Container": k[1], "Weight/drum (kg)": k[2],
-              "Qty": v, "Line (kg)": k[2]*v}
-             for k, v in sorted(g.items(), key=lambda kv: (-kv[0][2], kv[0][1]))])
+            [{"Item": k[0], "Container": k[1],
+              **({"Drum no.": k[2]} if has_dno else {}),
+              "Weight/drum (kg)": k[3], "Qty": v, "Line (kg)": k[3]*v}
+             for k, v in lines])
         st.dataframe(df, width="stretch", hide_index=True)
-        for k, v in g.items():
+        for k, v in lines:
             rows.append({"Truck": ti, "Item": k[0], "Container": k[1],
-                         "Weight_kg": k[2], "Qty": v, "Line_kg": k[2]*v,
+                         **({"Drum_no": k[2]} if has_dno else {}),
+                         "Weight_kg": k[3], "Qty": v, "Line_kg": k[3]*v,
                          "Truck_Total_kg": round(load, 1),
                          "Truck_Total_lb": round(load*LB, 1),
                          "Truck_Drums": len(b),
@@ -434,8 +517,10 @@ if go:
     plan_df = pd.DataFrame(rows)
     summary_df = pd.DataFrame(summary)
 
-    # what was shipped: one row per drum type, so the totals can be checked
-    # against the original packing list at a glance
+    # what was shipped: one row per drum type per container, so the totals can be
+    # checked against the original packing list at a glance. Drum numbers are
+    # deliberately left out here — this is the type summary, and the drum-by-drum
+    # detail is on the loading plan.
     types = {}
     for b in bins:
         for it in b:
