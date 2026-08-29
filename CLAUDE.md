@@ -38,13 +38,19 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   matches them up row by row, keeping blank lines so rows can't shift. Number
   parsing is deliberately strict (`_clean_num`) so a container number like
   `MSKU1234567` is never mistaken for a weight.
-  Two input **modes** (the `BY_TYPE` / `EACH` radio): a row per drum type with a
-  quantity, or a row per individual drum with a `Drum_no` and an implicit quantity
-  of 1. The mode changes which columns the grid shows, how a headerless paste is
-  mapped positionally, and how the handful of ambiguous headings in `_AMBIGUOUS`
-  ("No.", "Sr No.", "ID") are read — quantity by type, drum number drum by drum.
-  Container and drum number are carried on each item purely as labels and never
-  reach the model. Output columns follow the data, not the mode: `has_dno` adds a
+  One table covers both shapes of list **at the same time**: a row per drum type
+  with a quantity, or a row per individual drum with a `Drum_no` and no quantity.
+  There is deliberately no mode switch — **a blank quantity means one drum**, which
+  is what makes a drum-by-drum paste work with nothing typed, and the app says how
+  many rows it read that way. A header row is mapped by name (`_HEADER_MAP`; "Sr
+  No."/"ID" are drum numbers, a bare "No." is a quantity). Without one, `_roles`
+  reads the whole block at once: the weight is the numeric column whose median
+  lands in `_MIN_W.._MAX_W` (50–60,000 kg) and is largest — so a long serial number
+  can't be mistaken for a weight and a quantity can't either — with item /
+  container / drum no. to its left and the quantity in the single column to its
+  right. Where one column sits between item and weight, `_CONTAINER_RE` (ISO 6346)
+  decides container vs drum number. Container and drum number are carried on each
+  item purely as labels and never reach the model. Output columns follow the data, not the mode: `has_dno` adds a
   drum-number column to the truck tables and the Loading Plan only when some drum
   actually has one, and truck lines only collapse together when they share a drum
   number (or have none). The Drums Shipped sheet always groups by type/container
