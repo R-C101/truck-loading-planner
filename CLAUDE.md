@@ -30,29 +30,40 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   hangs forever. Do not raise it.
   Supports: weight cap, safety margin (kg or %), max items per bin, keep-groups.
   **`optimize_by_bl(items, capacity, ...)`** loads by bill of lading: items carry a
-  `bl`. Objective is lexicographic — **fewest trucks first** (exactly `optimize()`'s
-  count, since sharing is allowed it's the same number), **then fewest trucks
-  shared between BLs**. Stage 2 (`_bl_patterns`) is a CP-SAT pattern model: own
-  trucks are patterns over one BL's drums, shared trucks are weight-only patterns
-  fed from a pool any BL pays into, total capped at the stage-1 count, minimise
-  shared, with its own LP floor as a constraint. The warm start is the plain plan
-  with each truck filed as own/shared by what it actually carries; if that already
-  sits on the LP floor it is returned as proven without searching. Output order: each BL's own trucks in natural BL order (`_bl_key`, blank
-  BL last), then shared trucks. Falls back to `_bl_heuristic` (per-BL packing, then
-  re-pack the k emptiest trucks together) when patterns can't be enumerated, and to
-  the plain plan if any check fails. Checked against brute force on 300 random
-  shipments: exact path matches on (trucks, shared) every time; every LP-based
-  "proven" answer also checked against an independent solver (200 + 60 random
-  cases, no wrong claims).
+  `bl`. The dad's rule: **each BL gets its own trucks first**. Loaded alone a BL
+  needs n trucks and only the last is part-filled, so each BL must keep at least
+  **n − 1 trucks to itself**; only those part-filled "half trucks" may combine
+  across BLs. Within that rule: **fewest trucks, then fewest shared trucks**. This
+  can be more trucks than `optimize()` on everything (his first real sheet: 19 vs
+  18) — that was a deliberate call by the user; the result carries
+  `free_trucks` so the app can show the difference. `_bl_split_plan` does the
+  rule directly (per-BL `optimize`, pool each BL's emptiest truck, re-pack) and is
+  the warm start and fallback. `_bl_patterns` is exact: CP-SAT pattern model, own
+  trucks are patterns over one BL's drums (≥ own_min per BL), shared trucks are
+  weight-only patterns fed from a pool any BL pays into; stage 1 minimises total,
+  stage 2 caps it and minimises shared, each with its own LP floor and a
+  short-circuit when the warm start already sits on it. `engine` is the stage-1
+  proof (only "exact-optimal" if every per-BL n was proven too), `mix_engine`
+  stage 2. Output order: each BL's own trucks in natural BL order (`_bl_key`,
+  blank BL last), then shared trucks. Falls back to the split plan if any check
+  fails. Checked against brute force (rule applied literally) on 300 random
+  shipments: (trucks, shared) match every time.
   Running `python3 solver_core.py` self-tests on the drum shipment and must print
   **17 bins @ 21,500** and **16 bins @ 21,772**, all 81 items placed, none over cap.
 - **`streamlit_app.py`** — the web app the dad uses. Editable drum table (Item,
   BL no., Container no., Drum no., Weight, Qty), truck limit with kg/lb/tonne unit, optional safety
   margin / max-drums / keep-together, a Calculate button, per-truck result cards
   with fill bars, and CSV + Excel download. Styled to match the offline HTML tool.
-  Built entirely on `solver_core.optimize`.
+  Built entirely on `solver_core.optimize`. **Upload takes .xlsx or .csv**
+  (`read_file`): every sheet goes through `parse_grid`, the sheet with the most
+  drums wins, rows without a weight are dropped. `parse_grid` (shared with the
+  paste box) finds the heading row in the top 20 rows — a heading row never
+  contains a number — and skips "Total" lines. His packing lists use
+  `BL NO. | Container No | Drum No. | Gross Wt. (Kgs.) | DESTINATION`, with blank
+  columns/rows around them; DESTINATION goes into Item (shown as "Item /
+  Destination").
   The table is the **single source of truth** — the three ways to fill it (typing,
-  a CSV upload, or an Excel paste) all just write into `st.session_state.table_df`
+  a file upload, or an Excel paste) all just write into `st.session_state.table_df`
   and bump `grid_ver`, whose value is part of the `data_editor` key so the grid
   redraws instead of layering stale widget edits on top. `parse_block` reads a
   tab-separated block (header row auto-detected and mapped by name, otherwise
@@ -83,7 +94,8 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   **BL no.** is a real column (the dad puts the destination in Item for now). It is
   only read from a header row — headerless `_roles` never guesses a BL. The sidebar
   "Load BL by BL" (default on) switches to `optimize_by_bl` when the table has two
-  or more distinct BLs (blank counts as one); it overrides keep-together. Then the
+  or more distinct BLs (blank counts as one); it overrides keep-together, and
+  notes when mixing freely would need fewer trucks. Then the
   results get a **By BL** table/sheet (own truck numbers, drums on shared trucks),
   a heading before each BL's trucks, amber cards for shared trucks, and `Truck_BL`
   on the Loading Plan. BL columns only appear in the output when some drum has a

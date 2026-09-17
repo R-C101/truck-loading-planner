@@ -397,13 +397,13 @@ def optimize(items, capacity, max_items_per_bin=None, keep_groups=False,
 # ----------------------------------------------------------------------
 # loading by bill of lading
 #
-# A shipment can cover several BLs. The dad wants each BL loaded on its own
-# trucks, in BL order, with drums from different BLs sharing a truck only where
-# that saves one. Because sharing is allowed, the fewest trucks possible is
-# exactly what optimize() already finds — keeping BLs apart never costs a
-# truck, it only decides WHICH plan of that size we pick. So this is solved in
-# two stages: optimize() fixes the truck count, then a second model keeps that
-# count and minimises the number of shared trucks.
+# A shipment can cover several BLs. The dad's rule: every BL is loaded on its
+# own trucks first. Loaded alone, a BL needs some number of trucks n, and only
+# the last of them is part-filled — those part-filled "half trucks" are what
+# may be combined across BLs. So each BL keeps at least n - 1 trucks to itself,
+# and within that rule the plan uses as few trucks as possible, then as few
+# shared trucks as possible. That can be a truck more than loading everything
+# together would need; the result reports that number too.
 # ----------------------------------------------------------------------
 def _bl_key(bl):
     """Natural order (BL2 before BL10); drums with no BL go last."""
@@ -411,14 +411,46 @@ def _bl_key(bl):
     return (bl == "", [int(t) if t.isdigit() else t.lower() for t in parts])
 
 
-def _bl_patterns(items, cap, max_items, n_trucks, hint_bins, time_limit):
-    """Exact: with at most `n_trucks` trucks, as few shared trucks as possible.
+def _bl_split_plan(items, cap, max_items, time_limit, force):
+    """Dad's method done directly: load each BL alone, then pool every BL's
+    emptiest truck and re-pack the pool. Always valid for the rule, so it is
+    both the warm start for the exact model and the fallback.
 
-    Own trucks are patterns over a single BL's drums. Shared trucks are
-    patterns over drum weights only, filled from a pool that any BL can pay
-    into — which BL fills which slot doesn't change what fits, so it is decided
-    afterwards. At the optimum no shared truck can hold a single BL (it would
-    be an own truck and the objective would be lower), so the count is real.
+    Returns (bins, own_min, proven) — own_min[bl] is n - 1, and proven says
+    every n was proved minimal (otherwise own_min may be one high)."""
+    by_bl = {}
+    for it in items:
+        by_bl.setdefault(it["bl"], []).append(it)
+    bls = sorted(by_bl, key=_bl_key)
+    per = max(2.0, time_limit / max(1, len(bls)))
+    kept, pool, own_min, proven = [], [], {}, True
+    for b in bls:
+        r = optimize(by_bl[b], cap, max_items_per_bin=max_items,
+                     time_limit=per, force=force)
+        proven &= r["engine"] == "exact-optimal"
+        trucks = sorted(r["bins"], key=lambda t: (sum(i["weight"] for i in t), len(t)))
+        own_min[b] = len(trucks) - 1
+        pool.extend(trucks[0])
+        kept.extend(trucks[1:])
+    again = optimize(pool, cap, max_items_per_bin=max_items,
+                     time_limit=per, force=force)["bins"]
+    # the pool was one truck per BL; a re-pack that saves nothing only mixes
+    if len(again) >= len(bls):
+        again = [[i for i in pool if i["bl"] == b] for b in bls]
+    return kept + again, own_min, proven
+
+
+def _bl_patterns(items, cap, max_items, own_min, hint_bins, time_limit):
+    """Exact: under the BL rule, fewest trucks, then fewest shared trucks.
+
+    Own trucks are patterns over a single BL's drums, and BL b must run at
+    least own_min[b] of them. Shared trucks are patterns over drum weights
+    only, filled from a pool that any BL can pay into — which BL fills which
+    slot doesn't change what fits, so it is decided afterwards. At the stage-2
+    optimum no shared truck holds a single BL (it would be an own truck and
+    the objective would be lower), so the shared count is real.
+
+    Returns (bins, trucks_proof, shared_proof) or None.
     """
     by = {}
     for it in items:
@@ -437,53 +469,43 @@ def _bl_patterns(items, cap, max_items, n_trucks, hint_bins, time_limit):
         if not pats:
             return None
         own[b] = (ws, pats)
+    keys = sorted(by, key=lambda k: (_bl_key(k[0]), k[1]))
+    ub = len(hint_bins)
 
-    model = cp_model.CpModel()
-    x = {(b, k): model.NewIntVar(0, n_trucks, f"x{bi}_{k}")
-         for bi, b in enumerate(bls) for k in range(len(own[b][1]))}
-    y = [model.NewIntVar(0, n_trucks, f"y{i}") for i in range(len(shared))]
-    z = {key: model.NewIntVar(0, len(v), f"z{i}")        # drums sent to sharing
-         for i, (key, v) in enumerate(sorted(by.items(), key=lambda kv: (_bl_key(kv[0][0]), kv[0][1])))}
+    def build(mk, var):
+        """The same constraints for CP-SAT (mk=model) and its LP relaxation."""
+        x = {(b, k): var(ub) for b in bls for k in range(len(own[b][1]))}
+        y = [var(ub) for _ in shared]
+        z = {key: var(len(by[key])) for key in keys}    # drums sent to sharing
+        for (b, w), lst in by.items():
+            ws, pats = own[b]
+            j = ws.index(w)
+            mk(sum(p[j] * x[b, k] for k, p in enumerate(pats) if p[j])
+               + z[b, w] == len(lst))
+        for j, w in enumerate(weights):
+            mk(sum(q[j] * y[i] for i, q in enumerate(shared) if q[j])
+               == sum(z[b, w] for b in bls if (b, w) in z))
+        for b in bls:
+            if own_min[b] > 0:
+                mk(sum(x[b, k] for k in range(len(own[b][1]))) >= own_min[b])
+        return x, y, z
 
-    for (b, w), lst in by.items():
-        ws, pats = own[b]
-        j = ws.index(w)
-        model.Add(sum(p[j] * x[b, k] for k, p in enumerate(pats) if p[j])
-                  + z[b, w] == len(lst))
-    for j, w in enumerate(weights):
-        model.Add(sum(q[j] * y[i] for i, q in enumerate(shared) if q[j])
-                  == sum(z[b, w] for b in bls if (b, w) in z))
-    model.Add(sum(x.values()) + sum(y) <= n_trucks)
+    def lp_floor(stage, cap_total):
+        lp = pywraplp.Solver.CreateSolver("GLOP")
+        x, y, z = build(lp.Add, lambda hi: lp.NumVar(0, hi, ""))
+        if cap_total is not None:
+            lp.Add(sum(x.values()) + sum(y) <= cap_total)
+        lp.Minimize(sum(x.values()) + sum(y) if stage == 1 else sum(y))
+        if lp.Solve() != pywraplp.Solver.OPTIMAL:
+            return 0
+        return max(0, _lp_ceil(lp.Objective().Value()))
 
-    # LP relaxation of this same model: a floor on shared trucks, so the search
-    # stops the moment it reaches it instead of running out the clock
-    lp = pywraplp.Solver.CreateSolver("GLOP")
-    lx = {k: lp.NumVar(0, lp.infinity(), "") for k in x}
-    ly = [lp.NumVar(0, lp.infinity(), "") for _ in shared]
-    lz = {k: lp.NumVar(0, len(by[k]), "") for k in z}
-    for (b, w), lst in by.items():
-        ws, pats = own[b]
-        j = ws.index(w)
-        lp.Add(sum(p[j] * lx[b, k] for k, p in enumerate(pats) if p[j])
-               + lz[b, w] == len(lst))
-    for j, w in enumerate(weights):
-        lp.Add(sum(q[j] * ly[i] for i, q in enumerate(shared) if q[j])
-               == sum(lz[b, w] for b in bls if (b, w) in lz))
-    lp.Add(sum(lx.values()) + sum(ly) <= n_trucks)
-    lp.Minimize(sum(ly))
-    floor = 0
-    if lp.Solve() == pywraplp.Solver.OPTIMAL:
-        floor = max(0, _lp_ceil(lp.Objective().Value()))
-        model.Add(sum(y) >= floor)
-    model.Minimize(sum(y))
-
-    # Start from the plain plan, each truck filed under what it really carries:
-    # one BL -> that BL's own pattern, several -> a shared pattern. It is always
-    # feasible, and it is often already at the floor — then that is the proof.
+    # Warm start: the split plan, each truck filed under what it really
+    # carries — one BL -> that BL's own pattern, several -> a shared pattern.
     shared_at = {q: i for i, q in enumerate(shared)}
     own_at = {b: {p: k for k, p in enumerate(own[b][1])} for b in bls}
-    hx, hy = {k: 0 for k in x}, [0] * len(shared)
-    hz = {k: 0 for k in z}
+    hx = {(b, k): 0 for b in bls for k in range(len(own[b][1]))}
+    hy, hz = [0] * len(shared), {k: 0 for k in keys}
     for bin_items in hint_bins:
         tags = {it["bl"] for it in bin_items}
         if len(tags) == 1:
@@ -499,24 +521,58 @@ def _bl_patterns(items, cap, max_items, n_trucks, hint_bins, time_limit):
                 cnt[weights.index(it["weight"])] += 1
                 hz[it["bl"], it["weight"]] += 1
             hy[shared_at[tuple(cnt)]] += 1
-    if sum(hy) <= floor:
-        return [list(b) for b in hint_bins], "exact-optimal"
-    for k, v in x.items():
-        model.AddHint(v, hx[k])
-    for i, v in enumerate(y):
-        model.AddHint(v, hy[i])
-    for k, v in z.items():
-        model.AddHint(v, hz[k])
 
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = float(time_limit)
-    # NOTE: single worker on purpose — see _exact_patterns.
-    solver.parameters.num_search_workers = 1
-    st = solver.Solve(model)
-    if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return None
-    if solver.ObjectiveValue() <= floor:
-        st = cp_model.OPTIMAL                # reached the LP floor: proven
+    def solve(stage, cap_total, floor, hint, budget):
+        model = cp_model.CpModel()
+        x, y, z = build(model.Add, lambda hi: model.NewIntVar(0, hi, ""))
+        total = sum(x.values()) + sum(y)
+        if cap_total is not None:
+            model.Add(total <= cap_total)
+        obj = total if stage == 1 else sum(y)
+        model.Add(obj >= floor)                 # LP floor: lets it stop early
+        model.Minimize(obj)
+        hx_, hy_, hz_ = hint
+        for k, v in x.items():
+            model.AddHint(v, hx_[k])
+        for i, v in enumerate(y):
+            model.AddHint(v, hy_[i])
+        for k, v in z.items():
+            model.AddHint(v, hz_[k])
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = float(budget)
+        # NOTE: single worker on purpose — see _exact_patterns.
+        solver.parameters.num_search_workers = 1
+        st = solver.Solve(model)
+        if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        proven = st == cp_model.OPTIMAL or solver.ObjectiveValue() <= floor
+        vals = ({k: solver.Value(v) for k, v in x.items()},
+                [solver.Value(v) for v in y],
+                {k: solver.Value(v) for k, v in z.items()})
+        return vals, proven
+
+    # stage 1: fewest trucks under the rule
+    hint = (hx, hy, hz)
+    n_trucks = sum(hx.values()) + sum(hy)
+    floor = lp_floor(1, None)
+    proof1 = n_trucks <= floor
+    if not proof1:
+        got = solve(1, None, floor, hint, time_limit * 0.6)
+        if got is None:
+            return None
+        hint, proof1 = got
+        n_trucks = sum(hint[0].values()) + sum(hint[1])
+
+    # stage 2: keep that count, fewest shared trucks
+    floor = lp_floor(2, n_trucks)
+    proof2 = sum(hint[1]) <= floor
+    if not proof2:
+        got = solve(2, n_trucks, floor, hint, time_limit * 0.4)
+        if got is not None:
+            hint, proof2 = got
+    if hint[0] is hx and hint[1] is hy:
+        return [list(b) for b in hint_bins], proof1, proof2
+    vx, vy, _ = hint
 
     # hand out the real drums, in their original order
     queue = {key: list(reversed(v)) for key, v in by.items()}
@@ -524,7 +580,7 @@ def _bl_patterns(items, cap, max_items, n_trucks, hint_bins, time_limit):
     for b in bls:
         ws, pats = own[b]
         for k, pat in enumerate(pats):
-            for _ in range(solver.Value(x[b, k])):
+            for _ in range(vx[b, k]):
                 bins.append([queue[b, w].pop() for j, w in enumerate(ws)
                              for _ in range(pat[j])])
     # what is left goes onto the shared trucks; take it BL by BL so each shared
@@ -537,43 +593,18 @@ def _bl_patterns(items, cap, max_items, n_trucks, hint_bins, time_limit):
     for w in pool:
         pool[w].reverse()
     for i, q in sorted(enumerate(shared), key=lambda iq: iq[1], reverse=True):
-        for _ in range(solver.Value(y[i])):
+        for _ in range(vy[i]):
             bins.append([pool[w].pop() for j, w in enumerate(weights)
                          for _ in range(q[j])])
-    return bins, ("exact-optimal" if st == cp_model.OPTIMAL else "exact-feasible")
-
-
-def _bl_heuristic(items, cap, max_items, n_trucks):
-    """Fallback: load every BL on its own, then re-pack the emptiest trucks
-    together, taking as few as it needs to reach the target truck count."""
-    by_bl = {}
-    for it in items:
-        by_bl.setdefault(it["bl"], []).append(it)
-    trucks = []
-    for b in sorted(by_bl, key=_bl_key):
-        for bn in _heuristic(by_bl[b], cap, max_items, False):
-            trucks.append(bn)
-    trucks.sort(key=lambda bn: bn["load"])
-
-    def mixed(bins):
-        return sum(len({it["bl"] for it in bn}) > 1 for bn in bins)
-
-    best = ([bn["items"] for bn in trucks], len(trucks), 0)
-    for k in range(2, len(trucks) + 1):
-        pool = [it for bn in trucks[:k] for it in bn["items"]]
-        again = [bn["items"] for bn in _heuristic(pool, cap, max_items, False, restarts=30)]
-        if len(again) >= k:
-            continue
-        plan = [bn["items"] for bn in trucks[k:]] + again
-        if (len(plan), mixed(plan)) < (best[1], best[2]):
-            best = (plan, len(plan), mixed(plan))
-        if len(plan) <= n_trucks:
-            break                   # smallest pool that reaches the target
-    return best[0]
+    return bins, proof1, proof2
 
 
 def optimize_by_bl(items, capacity, max_items_per_bin=None, safety_margin=0.0,
                    margin_is_pct=False, time_limit=20, force=None):
+    """Load BL by BL (see the rule above). Same result dict as optimize(), plus
+    bin_bl (each truck's BL, None if shared), mixed (shared truck count),
+    mix_engine (proof of that count) and free_trucks / free_engine (what
+    loading everything together, ignoring BLs, would need)."""
     items = [dict(it) for it in items]
     for k, it in enumerate(items):
         it["bl"] = str(it.get("bl") or "").strip()
@@ -582,32 +613,32 @@ def optimize_by_bl(items, capacity, max_items_per_bin=None, safety_margin=0.0,
     base = optimize(items, capacity, max_items_per_bin=max_items_per_bin,
                     safety_margin=safety_margin, margin_is_pct=margin_is_pct,
                     time_limit=time_limit, force=force)
-    base.update(bin_bl=[], mixed=0, mix_engine=None)
+    base.update(bin_bl=[], mixed=0, mix_engine=None,
+                free_trucks=len(base["bins"]), free_engine=base["engine"])
     if not base["bins"]:
         return base
     cap = base["capacity_used"]
-    target = len(base["bins"])
 
-    bins, mix_engine = None, None
     if len({it["bl"] for it in items}) <= 1:
-        bins, mix_engine = base["bins"], "exact-optimal"      # nothing to separate
+        bins, engine, mix_engine = base["bins"], base["engine"], "exact-optimal"
     else:
+        split, own_min, n_proven = _bl_split_plan(
+            items, cap, max_items_per_bin, time_limit, force)
+        bins, engine, mix_engine = split, "heuristic", "heuristic"
         if force != "heuristic" and _HAS_ORTOOLS:
-            got = _bl_patterns(items, cap, max_items_per_bin, target,
-                               base["bins"], time_limit)
+            got = _bl_patterns(items, cap, max_items_per_bin, own_min, split, time_limit)
             if got:
-                bins, mix_engine = got
-        if bins is None:
-            bins, mix_engine = _bl_heuristic(items, cap, max_items_per_bin, target), "heuristic"
-
-    # the guarantee: every drum exactly once, no truck over the cap, and never
-    # more trucks than the plain plan. Anything else -> use the plain plan.
-    ok = (sorted(it["_idx"] for b in bins for it in b) == list(range(len(items)))
-          and all(sum(it["weight"] for it in b) <= cap + 1e-6 for b in bins)
-          and (not max_items_per_bin or all(len(b) <= max_items_per_bin for b in bins))
-          and len(bins) <= target)
-    if not ok:
-        bins, mix_engine = base["bins"], None
+                bins, p1, p2 = got
+                engine = "exact-optimal" if p1 and n_proven else "exact-feasible"
+                mix_engine = "exact-optimal" if p2 else "exact-feasible"
+        # the guarantee: every drum exactly once, no truck over the cap, never
+        # more trucks than the split plan. Anything else -> the split plan.
+        ok = (sorted(it["_idx"] for b in bins for it in b) == list(range(len(items)))
+              and all(sum(it["weight"] for it in b) <= cap + 1e-6 for b in bins)
+              and (not max_items_per_bin or all(len(b) <= max_items_per_bin for b in bins))
+              and len(bins) <= len(split))
+        if not ok:
+            bins, engine, mix_engine = split, "heuristic", "heuristic"
 
     def truck_bl(b):
         s = {it["bl"] for it in b}
@@ -626,6 +657,7 @@ def optimize_by_bl(items, capacity, max_items_per_bin=None, safety_margin=0.0,
     base["bins"] = own + shared
     base["bin_bl"] = [truck_bl(b) for b in base["bins"]]
     base["mixed"] = len(shared)
+    base["engine"] = engine
     base["mix_engine"] = mix_engine
     return base
 

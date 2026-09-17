@@ -6,9 +6,11 @@ Deploy free:   push this folder to a GitHub repo, then on
                https://share.streamlit.io -> New app -> pick the repo,
                main file = streamlit_app.py.  requirements.txt installs the rest.
 """
+import csv
 import io
 import re
 import time
+import openpyxl
 import pandas as pd
 import streamlit as st
 from solver_core import optimize, optimize_by_bl, _bl_key
@@ -210,31 +212,83 @@ def _record(rec):
             "Qty": int(q) if q is not None else None}
 
 
-def parse_block(text):
-    """A block of cells copied from Excel: tab separated, one row per line."""
-    lines = [l for l in (text or "").splitlines() if l.strip()]
-    if not lines:
+def _find_header(grid):
+    """Index of the heading row, or None. Real sheets put a title or blank rows
+    above it, so look through the top rows — but a heading row never holds a
+    number, which keeps a data row from ever being taken for one."""
+    for r, row in enumerate(grid[:20]):
+        if any(_is_num(c) for c in row if c):
+            continue
+        roles = {_header_role(c) for c in row if c} - {None}
+        if len(roles) >= 2:
+            return r
+    return None
+
+
+def parse_grid(grid):
+    """Rows of cells (from a paste or a file) -> the drum table."""
+    grid = [r for r in grid if any(c for c in r)]
+    if not grid:
         return _normalise(DEFAULT.copy())
-    grid = [[c.strip() for c in l.split("\t")] if "\t" in l else [l.strip()]
-            for l in lines]
-    head = [_header_role(c) for c in grid[0]]
-    seen = set()                                    # two weight columns (gross and
-    for i, h in enumerate(head):                    # net, say): the first one wins
-        if h in seen:
-            head[i] = None
-        seen.add(h)
-    if sum(h is not None for h in head) >= 2:       # first line is a header row
-        body, cols = grid[1:], head
+    h = _find_header(grid)
+    if h is not None:
+        head = [_header_role(c) for c in grid[h]]
+        seen = set()                                # two weight columns (gross and
+        for i, role in enumerate(head):             # net, say): the first one wins
+            if role in seen:
+                head[i] = None
+            seen.add(role)
+        body, cols = grid[h + 1:], head
     else:
-        body, cols = grid, None
-    if cols is None and body:
-        cols = _roles(body)
+        body, cols = grid, _roles(grid)
     out = []
     for cells in body:
-        r = _record({h: v for h, v in zip(cols, cells) if h})
+        if any(_TOTAL_RE.search(c) for c in cells if c and not _is_num(c)):
+            continue                                # a totals line isn't a drum
+        r = _record({role: v for role, v in zip(cols, cells) if role})
         if r:
             out.append(r)
     return _normalise(pd.DataFrame(out, columns=COLS))
+
+
+_TOTAL_RE = re.compile(r"(?i)\b(grand\s*)?totals?\b")
+
+
+def parse_block(text):
+    """A block of cells copied from Excel: tab separated, one row per line."""
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    return parse_grid([[c.strip() for c in l.split("\t")] if "\t" in l
+                       else [l.strip()] for l in lines])
+
+
+def _cell(v):
+    """A spreadsheet cell as the text Excel would show when copied."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)                  # drum no. 2604340004, not 2604340004.0
+    return str(v).strip()
+
+
+def read_file(data, name):
+    """An uploaded .xlsx or .csv -> (table, sheet it came from). Every sheet is
+    tried and the one with the most drums wins, so a workbook with a cover or
+    notes sheet still works. Rows without a weight are left out."""
+    if name.lower().endswith((".xlsx", ".xlsm")):
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        sheets = [(ws.title, [[_cell(c) for c in row]
+                              for row in ws.iter_rows(values_only=True)])
+                  for ws in wb.worksheets]
+    else:
+        text = data.decode("utf-8-sig", errors="replace")
+        sheets = [(None, [[_cell(c) for c in row] for row in csv.reader(io.StringIO(text))])]
+    best = (_normalise(DEFAULT.copy()), None)
+    for title, grid in sheets:
+        df = parse_grid(grid)
+        df = df[df["Weight_kg"].notna()].reset_index(drop=True)
+        if len(df) > len(best[0]):
+            best = (df, title)
+    return best
 
 
 def _lines(text):
@@ -288,9 +342,9 @@ with st.sidebar:
     max_n = st.number_input("Max drums per truck", min_value=1, value=10, step=1, disabled=not use_maxn)
 
     by_bl = st.checkbox("Load BL by BL", value=True)
-    st.caption("When the BL no. column is filled in, each BL gets its own trucks, "
-               "in BL order. Drums from different BLs only share a truck where "
-               "that saves one — it never costs an extra truck.")
+    st.caption("When the BL no. column is filled in, each BL is loaded on its own "
+               "trucks first, in BL order. Only each BL's last, part-filled truck "
+               "may be combined with other BLs' — and only where that saves a truck.")
     keep = st.checkbox("Keep drum types together where possible")
     prove = st.checkbox("Prove it's the fewest possible trucks", value=True)
     time_limit = st.slider("Max proof time (seconds)", 3, 60, 10, disabled=not prove)
@@ -299,7 +353,7 @@ with st.sidebar:
                "stops at the time limit and returns the best plan it found.")
 
 # ---------------- step 1: items ----------------
-# The table is the single source of truth. Uploading a CSV or pasting from Excel
+# The table is the single source of truth. Uploading a file or pasting from Excel
 # just fills it in; nothing goes to the solver except what is on screen.
 if "table_df" not in st.session_state:
     st.session_state.table_df = _normalise(DEFAULT.copy())
@@ -347,7 +401,7 @@ st.caption("One row per drum type — the item, its BL number, the container it 
            "from, the weight of ONE drum (kg), and how many. If a row is a single drum with "
            "its own number, put the number in **Drum no.** and leave the quantity "
            "empty; it counts as one drum. The two can be mixed in one shipment. "
-           "Type into the table, paste from Excel, or upload a CSV, then check it "
+           "Type into the table, paste from Excel, or upload the Excel file, then check it "
            "before pressing Calculate.")
 
 with st.expander("📋 Paste from Excel", expanded=False):
@@ -384,19 +438,30 @@ with st.expander("📋 Paste from Excel", expanded=False):
                     "a whole block in one go.")
         _preview_and_add(parse_columns(*boxes), "cols")
 
-up = st.file_uploader("Upload CSV (optional)", type=["csv"], label_visibility="collapsed")
+up = st.file_uploader("Upload an Excel sheet or CSV", type=["xlsx", "xlsm", "csv"])
 if up is not None:
     uid = f"{up.name}:{up.size}"
     if st.session_state.upload_id != uid:      # only on a genuinely new file, so a
         st.session_state.upload_id = uid       # rerun never wipes what he has typed
-        st.session_state.table_df = _normalise(pd.read_csv(up))
+        df, sheet = read_file(up.getvalue(), up.name)
+        st.session_state.table_df = df
+        st.session_state.upload_note = (len(df), int(df["Qty"].fillna(0).sum()), sheet)
         st.session_state.grid_ver += 1
+    n_rows, n_drums, sheet = st.session_state.get("upload_note", (0, 0, None))
+    if n_rows:
+        st.caption(f"Read {n_rows} rows, {n_drums:,} drums"
+                   + (f" from sheet “{sheet}”" if sheet else "")
+                   + " — check the table below.")
+    else:
+        st.warning("Couldn't find any drums with a weight in that file. It needs a "
+                   "heading row (e.g. BL No., Container No, Drum No., Gross Wt., "
+                   "Destination) above the drums.")
 
 edited = st.data_editor(
     st.session_state.table_df, num_rows="dynamic", width="stretch",
     hide_index=True, key=f"grid_{st.session_state.grid_ver}",
     column_config={
-        "Item": st.column_config.TextColumn("Item", width="medium"),
+        "Item": st.column_config.TextColumn("Item / Destination", width="medium"),
         "BL": st.column_config.TextColumn("BL no.", width="small"),
         "Container": st.column_config.TextColumn("Container no.", width="medium"),
         "Drum_no": st.column_config.TextColumn("Drum no.", width="small"),
@@ -523,7 +588,8 @@ if go:
         st.stop()
 
     bins = res["bins"]
-    note = {"exact-optimal": "✅ proved the fewest possible trucks",
+    note = {"exact-optimal": ("✅ proved the fewest possible trucks"
+                              + (" loading BL by BL" if use_bl else "")),
             "exact-feasible": "very good solution (time limit reached before proof)",
             "best-found": "strong solution — couldn't prove a truck can be saved in the time allowed",
             "heuristic": "very good solution"}.get(res["engine"], res["engine"])
@@ -540,13 +606,18 @@ if go:
     bin_bl = res["bin_bl"] if use_bl else [None] * len(bins)
     if use_bl:
         n_mixed = res["mixed"]
-        how = ("the fewest possible without adding a truck"
+        how = ("the fewest possible for this many trucks"
                if res["mix_engine"] == "exact-optimal"
                else "kept as low as it could find in the time allowed")
         st.info(f"Loaded BL by BL: {len(bins) - n_mixed} trucks carry a single BL"
-                + (f", and {n_mixed} {'is' if n_mixed == 1 else 'are'} shared "
-                   f"between BLs — {how}." if n_mixed else
-                   " and none have to be shared."))
+                + (f", and {n_mixed} {'is' if n_mixed == 1 else 'are'} shared, "
+                   f"combining BLs' part-filled last trucks — {how}." if n_mixed else
+                   " and none are shared."))
+        saved = len(bins) - res["free_trucks"]
+        if saved > 0:
+            st.caption(f"Ignoring BLs and mixing drums freely would take "
+                       f"{res['free_trucks']} trucks ({saved} fewer) — untick "
+                       f"“Load BL by BL” in the sidebar to see that plan.")
 
         # overview per BL, which is what gets checked and passed on first
         by = {}
