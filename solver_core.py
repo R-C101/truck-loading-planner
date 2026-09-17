@@ -397,7 +397,12 @@ def optimize(items, capacity, max_items_per_bin=None, keep_groups=False,
 # ----------------------------------------------------------------------
 # loading by bill of lading
 #
-# A shipment can cover several BLs. The dad's rule: every BL is loaded on its
+# A shipment can cover several BLs, and there are three ways to treat them:
+#   full     — fewest trucks, full stop; among plans that size, as few trucks
+#              shared between BLs as possible.
+#   half     — the dad's usual rule, below.
+#   separate — every BL strictly on its own trucks, nothing shared.
+# The half rule: every BL is loaded on its
 # own trucks first. Loaded alone, a BL needs some number of trucks n, and only
 # the last of them is part-filled — those part-filled "half trucks" are what
 # may be combined across BLs. So each BL keeps at least n - 1 trucks to itself,
@@ -411,6 +416,21 @@ def _bl_key(bl):
     return (bl == "", [int(t) if t.isdigit() else t.lower() for t in parts])
 
 
+def _bl_alone(items, cap, max_items, time_limit, force):
+    """Each BL packed on its own: ({bl: trucks}, every count proven)."""
+    by_bl = {}
+    for it in items:
+        by_bl.setdefault(it["bl"], []).append(it)
+    per = max(2.0, time_limit / max(1, len(by_bl)))
+    out, proven = {}, True
+    for b in sorted(by_bl, key=_bl_key):
+        r = optimize(by_bl[b], cap, max_items_per_bin=max_items,
+                     time_limit=per, force=force)
+        proven &= r["engine"] == "exact-optimal"
+        out[b] = r["bins"]
+    return out, proven
+
+
 def _bl_split_plan(items, cap, max_items, time_limit, force):
     """Dad's method done directly: load each BL alone, then pool every BL's
     emptiest truck and re-pack the pool. Always valid for the rule, so it is
@@ -418,17 +438,12 @@ def _bl_split_plan(items, cap, max_items, time_limit, force):
 
     Returns (bins, own_min, proven) — own_min[bl] is n - 1, and proven says
     every n was proved minimal (otherwise own_min may be one high)."""
-    by_bl = {}
-    for it in items:
-        by_bl.setdefault(it["bl"], []).append(it)
-    bls = sorted(by_bl, key=_bl_key)
+    alone, proven = _bl_alone(items, cap, max_items, time_limit, force)
+    bls = list(alone)
     per = max(2.0, time_limit / max(1, len(bls)))
-    kept, pool, own_min, proven = [], [], {}, True
+    kept, pool, own_min = [], [], {}
     for b in bls:
-        r = optimize(by_bl[b], cap, max_items_per_bin=max_items,
-                     time_limit=per, force=force)
-        proven &= r["engine"] == "exact-optimal"
-        trucks = sorted(r["bins"], key=lambda t: (sum(i["weight"] for i in t), len(t)))
+        trucks = sorted(alone[b], key=lambda t: (sum(i["weight"] for i in t), len(t)))
         own_min[b] = len(trucks) - 1
         pool.extend(trucks[0])
         kept.extend(trucks[1:])
@@ -440,7 +455,8 @@ def _bl_split_plan(items, cap, max_items, time_limit, force):
     return kept + again, own_min, proven
 
 
-def _bl_patterns(items, cap, max_items, own_min, hint_bins, time_limit):
+def _bl_patterns(items, cap, max_items, own_min, hint_bins, time_limit,
+                 total_proven=False):
     """Exact: under the BL rule, fewest trucks, then fewest shared trucks.
 
     Own trucks are patterns over a single BL's drums, and BL b must run at
@@ -450,7 +466,8 @@ def _bl_patterns(items, cap, max_items, own_min, hint_bins, time_limit):
     optimum no shared truck holds a single BL (it would be an own truck and
     the objective would be lower), so the shared count is real.
 
-    Returns (bins, trucks_proof, shared_proof) or None.
+    total_proven: the hint's truck count is already known to be the fewest,
+    so stage 1 is skipped. Returns (bins, trucks_proof, shared_proof) or None.
     """
     by = {}
     for it in items:
@@ -554,8 +571,8 @@ def _bl_patterns(items, cap, max_items, own_min, hint_bins, time_limit):
     # stage 1: fewest trucks under the rule
     hint = (hx, hy, hz)
     n_trucks = sum(hx.values()) + sum(hy)
-    floor = lp_floor(1, None)
-    proof1 = n_trucks <= floor
+    floor = 0 if total_proven else lp_floor(1, None)
+    proof1 = total_proven or n_trucks <= floor
     if not proof1:
         got = solve(1, None, floor, hint, time_limit * 0.6)
         if got is None:
@@ -600,8 +617,9 @@ def _bl_patterns(items, cap, max_items, own_min, hint_bins, time_limit):
 
 
 def optimize_by_bl(items, capacity, max_items_per_bin=None, safety_margin=0.0,
-                   margin_is_pct=False, time_limit=20, force=None):
-    """Load BL by BL (see the rule above). Same result dict as optimize(), plus
+                   margin_is_pct=False, time_limit=20, force=None, mode="half"):
+    """Load BL by BL; mode is "full", "half" or "separate" (see above). Same
+    result dict as optimize(), plus
     bin_bl (each truck's BL, None if shared), mixed (shared truck count),
     mix_engine (proof of that count) and free_trucks / free_engine (what
     loading everything together, ignoring BLs, would need)."""
@@ -621,24 +639,40 @@ def optimize_by_bl(items, capacity, max_items_per_bin=None, safety_margin=0.0,
 
     if len({it["bl"] for it in items}) <= 1:
         bins, engine, mix_engine = base["bins"], base["engine"], "exact-optimal"
+    elif mode == "separate":
+        alone, n_proven = _bl_alone(items, cap, max_items_per_bin, time_limit, force)
+        bins = [t for trucks in alone.values() for t in trucks]
+        engine = "exact-optimal" if n_proven else "heuristic"
+        mix_engine = "exact-optimal"
     else:
-        split, own_min, n_proven = _bl_split_plan(
-            items, cap, max_items_per_bin, time_limit, force)
-        bins, engine, mix_engine = split, "heuristic", "heuristic"
+        if mode == "full":
+            fallback = base["bins"]
+            own_min = {it["bl"]: 0 for it in items}
+            engine = base["engine"]
+            n_proven = engine == "exact-optimal"
+        else:
+            fallback, own_min, n_proven = _bl_split_plan(
+                items, cap, max_items_per_bin, time_limit, force)
+            engine = "heuristic"
+        bins, mix_engine = fallback, "heuristic"
         if force != "heuristic" and _HAS_ORTOOLS:
-            got = _bl_patterns(items, cap, max_items_per_bin, own_min, split, time_limit)
+            got = _bl_patterns(items, cap, max_items_per_bin, own_min, fallback,
+                               time_limit, total_proven=(mode == "full"))
             if got:
                 bins, p1, p2 = got
-                engine = "exact-optimal" if p1 and n_proven else "exact-feasible"
+                if mode != "full":
+                    engine = "exact-optimal" if p1 and n_proven else "exact-feasible"
                 mix_engine = "exact-optimal" if p2 else "exact-feasible"
         # the guarantee: every drum exactly once, no truck over the cap, never
-        # more trucks than the split plan. Anything else -> the split plan.
+        # more trucks than the fallback plan. Anything else -> the fallback.
         ok = (sorted(it["_idx"] for b in bins for it in b) == list(range(len(items)))
               and all(sum(it["weight"] for it in b) <= cap + 1e-6 for b in bins)
               and (not max_items_per_bin or all(len(b) <= max_items_per_bin for b in bins))
-              and len(bins) <= len(split))
+              and len(bins) <= len(fallback))
         if not ok:
-            bins, engine, mix_engine = split, "heuristic", "heuristic"
+            bins, mix_engine = fallback, "heuristic"
+            if mode != "full":
+                engine = "heuristic"
 
     def truck_bl(b):
         s = {it["bl"] for it in b}

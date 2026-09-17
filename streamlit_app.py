@@ -341,10 +341,6 @@ with st.sidebar:
     use_maxn = st.checkbox("Limit drums per truck (space)")
     max_n = st.number_input("Max drums per truck", min_value=1, value=10, step=1, disabled=not use_maxn)
 
-    by_bl = st.checkbox("Load BL by BL", value=True)
-    st.caption("When the BL no. column is filled in, each BL is loaded on its own "
-               "trucks first, in BL order. Only each BL's last, part-filled truck "
-               "may be combined with other BLs' — and only where that saves a truck.")
     keep = st.checkbox("Keep drum types together where possible")
     prove = st.checkbox("Prove it's the fewest possible trucks", value=True)
     time_limit = st.slider("Max proof time (seconds)", 3, 60, 10, disabled=not prove)
@@ -480,6 +476,7 @@ def _row_qty(r):
 
 
 _ok = edited.dropna(subset=["Weight_kg"]) if len(edited) else edited
+_nbl = 0
 if len(_ok):
     _q = _ok.apply(_row_qty, axis=1)
     _nbl = _ok["BL"].dropna().astype(str).str.strip().replace("", None).nunique()
@@ -513,6 +510,22 @@ def to_kg(v, unit):
     return v / LB if unit == "lb" else v * 1000 if unit == "tonnes" else v
 
 st.subheader("2 · Plan")
+MODES = {
+    "Full mix": ("full", "Fewest trucks possible. BLs share trucks wherever that "
+                 "saves one, and as little as that allows."),
+    "Half mix": ("half", "Each BL fills its own trucks first; only their "
+                 "part-filled last trucks are combined, where that saves one."),
+    "BL separate": ("separate", "Every BL on its own trucks. Nothing is shared."),
+}
+_has_bl = _nbl > 1
+# the default follows the table: BL numbers entered -> keep them apart. Keyed on
+# that, so his own pick sticks until BLs appear or disappear.
+mode_name = st.radio("Loading BLs", list(MODES), index=2 if _has_bl else 0,
+                     horizontal=True, key=f"bl_mode_{_has_bl}",
+                     captions=[d for _, d in MODES.values()])
+mode = MODES[mode_name][0]
+if not _has_bl:
+    st.caption("No BL numbers in the table (or just one), so all three give the same plan.")
 go = st.button("Calculate loading plan", type="primary")
 
 if go:
@@ -560,9 +573,12 @@ if go:
 
     cap_kg = to_kg(cap_val, cap_unit)
     # BL by BL only means something with at least two BLs (a blank counts as one)
-    use_bl = by_bl and len({it["bl"] for it in items}) > 1
+    use_bl = len({it["bl"] for it in items}) > 1 and not (mode == "full" and keep)
     if use_bl and keep:
-        st.caption("Loading BL by BL, so “keep drum types together” is not used.")
+        st.caption(f"{mode_name} keeps BLs apart, so “keep drum types together” is not used.")
+    elif keep and mode == "full" and len({it["bl"] for it in items}) > 1:
+        st.caption("“Keep drum types together” is ticked, so the plan groups by "
+                   "drum type and doesn't look at BLs.")
     spin_msg = (f"Optimising and proving the fewest possible trucks… "
                 f"(stops after {int(time_limit)}s on an awkward load)" if prove
                 else "Optimising… (fast plan, no optimality proof)")
@@ -573,7 +589,7 @@ if go:
                     margin_is_pct=(use_margin and margin_unit == "%"),
                     time_limit=time_limit,
                     force=None if prove else "heuristic")
-        res = (optimize_by_bl(items, cap_kg, **opts) if use_bl
+        res = (optimize_by_bl(items, cap_kg, mode=mode, **opts) if use_bl
                else optimize(items, cap_kg, keep_groups=keep, **opts))
         elapsed = time.perf_counter() - t0
 
@@ -589,7 +605,9 @@ if go:
 
     bins = res["bins"]
     note = {"exact-optimal": ("✅ proved the fewest possible trucks"
-                              + (" loading BL by BL" if use_bl else "")),
+                              + ({"half": " with each BL on its own trucks first",
+                                  "separate": " keeping every BL separate"}
+                                 .get(mode, "") if use_bl else "")),
             "exact-feasible": "very good solution (time limit reached before proof)",
             "best-found": "strong solution — couldn't prove a truck can be saved in the time allowed",
             "heuristic": "very good solution"}.get(res["engine"], res["engine"])
@@ -609,15 +627,17 @@ if go:
         how = ("the fewest possible for this many trucks"
                if res["mix_engine"] == "exact-optimal"
                else "kept as low as it could find in the time allowed")
-        st.info(f"Loaded BL by BL: {len(bins) - n_mixed} trucks carry a single BL"
+        why = {"full": "where that saves a truck",
+               "half": "combining BLs' part-filled last trucks"}.get(mode, "")
+        st.info(f"{mode_name}: {len(bins) - n_mixed} trucks carry a single BL"
                 + (f", and {n_mixed} {'is' if n_mixed == 1 else 'are'} shared, "
-                   f"combining BLs' part-filled last trucks — {how}." if n_mixed else
+                   f"{why} — {how}." if n_mixed else
                    " and none are shared."))
         saved = len(bins) - res["free_trucks"]
         if saved > 0:
-            st.caption(f"Ignoring BLs and mixing drums freely would take "
-                       f"{res['free_trucks']} trucks ({saved} fewer) — untick "
-                       f"“Load BL by BL” in the sidebar to see that plan.")
+            st.caption(f"Full mix would take {res['free_trucks']} trucks "
+                       f"({saved} fewer) by sharing more between BLs — pick it "
+                       f"above to see that plan.")
 
         # overview per BL, which is what gets checked and passed on first
         by = {}
