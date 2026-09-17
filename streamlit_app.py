@@ -109,6 +109,31 @@ def _key(s):
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
+def _header_role(cell):
+    """Which column a heading names. Exact names first, then the heading with its
+    unit dropped ("Gross Wt. (Kgs.)" -> "grosswt"), then by what it contains —
+    real packing lists never use quite the same wording twice."""
+    k = _key(cell)
+    if k in _HEADER_MAP:
+        return _HEADER_MAP[k]
+    bare = re.sub(r"(kgs?|lbs?|mt|tons?|tonnes?)$", "", k)
+    if bare in _HEADER_MAP:
+        return _HEADER_MAP[bare]
+    if "drum" in k and any(t in k for t in ("no", "num", "id", "serial")):
+        return "Drum_no"
+    if "weight" in k or "wt" in k:
+        return "Weight_kg"
+    if "container" in k or k.startswith("cntr"):
+        return "Container"
+    if k.startswith(("blno", "blnum", "billoflading", "bolno", "hblno", "mblno")):
+        return "BL"
+    if "qty" in k or "quantity" in k:
+        return "Qty"
+    if any(t in k for t in ("dest", "item", "desc")):
+        return "Item"
+    return None
+
+
 def _clean_num(v):
     """'8,065 kg' / '7 935' / '8065.0' -> a bare number string, else None.
     Deliberately strict: 'MSKU1234567' must never be read as a weight."""
@@ -192,7 +217,12 @@ def parse_block(text):
         return _normalise(DEFAULT.copy())
     grid = [[c.strip() for c in l.split("\t")] if "\t" in l else [l.strip()]
             for l in lines]
-    head = [_HEADER_MAP.get(_key(c)) for c in grid[0]]
+    head = [_header_role(c) for c in grid[0]]
+    seen = set()                                    # two weight columns (gross and
+    for i, h in enumerate(head):                    # net, say): the first one wins
+        if h in seen:
+            head[i] = None
+        seen.add(h)
     if sum(h is not None for h in head) >= 2:       # first line is a header row
         body, cols = grid[1:], head
     else:

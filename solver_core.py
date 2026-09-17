@@ -49,6 +49,7 @@ import re
 
 try:
     from ortools.sat.python import cp_model
+    from ortools.linear_solver import pywraplp
     _HAS_ORTOOLS = True
 except Exception:
     _HAS_ORTOOLS = False
@@ -190,13 +191,47 @@ def _gen_patterns(weights, counts, cap, max_items, limit=200_000):
     return out
 
 
-def _exact_patterns(items, cap, max_items, upper_bound, time_limit):
-    """Prove the minimum number of bins via the pattern model."""
+def _lp_ceil(value):
+    """Round an LP optimum up to the integer bound it proves. The slack keeps a
+    floating-point 17.0000001 from being read as 18 — a bound that is one too
+    low only costs a proof, one too high would be a wrong answer."""
+    return math.ceil(value - 1e-4)
+
+
+def _weight_counts(items):
     counter = {}
     for it in items:
         counter[it["weight"]] = counter.get(it["weight"], 0) + 1
     weights = sorted(counter)
-    counts = [counter[w] for w in weights]
+    return weights, [counter[w] for w in weights]
+
+
+def _pattern_lp_bound(items, cap, max_items):
+    """Lower bound on trucks from the LP relaxation of the pattern model.
+
+    CP-SAT finds good plans quickly but, when every drum has its own weight,
+    it can spend the whole time limit failing to prove there isn't one truck
+    fewer. The LP bound of this model is famously tight (it is almost always
+    the true answer, rounded up) and costs milliseconds, so it settles most of
+    those cases outright. None if the patterns can't be enumerated.
+    """
+    weights, counts = _weight_counts(items)
+    pats = _gen_patterns(weights, counts, cap, max_items)
+    if not pats:
+        return None
+    lp = pywraplp.Solver.CreateSolver("GLOP")
+    x = [lp.NumVar(0, lp.infinity(), "") for _ in pats]
+    for j in range(len(weights)):
+        lp.Add(sum(p[j] * x[i] for i, p in enumerate(pats) if p[j]) == counts[j])
+    lp.Minimize(sum(x))
+    if lp.Solve() != pywraplp.Solver.OPTIMAL:
+        return None
+    return _lp_ceil(lp.Objective().Value())
+
+
+def _exact_patterns(items, cap, max_items, upper_bound, time_limit, lower_bound=0):
+    """Prove the minimum number of bins via the pattern model."""
+    weights, counts = _weight_counts(items)
 
     pats = _gen_patterns(weights, counts, cap, max_items)
     if not pats:
@@ -206,8 +241,10 @@ def _exact_patterns(items, cap, max_items, upper_bound, time_limit):
     # x[p] = how many trucks are loaded with pattern p
     x = [model.NewIntVar(0, upper_bound, f"p{i}") for i in range(len(pats))]
     for j in range(len(weights)):                   # ship exactly what we have
-        model.Add(sum(pats[i][j] * x[i] for i in range(len(pats))) == counts[j])
+        model.Add(sum(pats[i][j] * x[i] for i in range(len(pats)) if pats[i][j])
+                  == counts[j])
     model.Add(sum(x) <= upper_bound)                # never worse than the heuristic
+    model.Add(sum(x) >= lower_bound)                # known bound: lets it stop early
     model.Minimize(sum(x))
 
     solver = cp_model.CpSolver()
@@ -237,7 +274,7 @@ def _exact_patterns(items, cap, max_items, upper_bound, time_limit):
 # ----------------------------------------------------------------------
 # exact engine B — one variable per item (fallback for many distinct weights)
 # ----------------------------------------------------------------------
-def _exact(items, cap, max_items, upper_bound, time_limit):
+def _exact(items, cap, max_items, upper_bound, time_limit, lower_bound=0):
     n = len(items)
     B = upper_bound
     w = [it["weight"] for it in items]
@@ -253,6 +290,7 @@ def _exact(items, cap, max_items, upper_bound, time_limit):
             model.Add(sum(x[i, b] for i in range(n)) <= max_items * y[b])
         if b + 1 < B:
             model.Add(y[b] >= y[b + 1])          # symmetry break
+    model.Add(sum(y) >= lower_bound)
     model.Minimize(sum(y))
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_limit)
@@ -321,6 +359,15 @@ def optimize(items, capacity, max_items_per_bin=None, keep_groups=False,
     use_exact = force == "exact" or (
         force != "heuristic" and _HAS_ORTOOLS and not keep_groups
     )
+    # Still a gap: try the (much stronger) LP bound before any search.
+    if use_exact and _HAS_ORTOOLS:
+        lp = _pattern_lp_bound(items, cap, max_items_per_bin)
+        if lp is not None:
+            lb = max(lb, lp)
+        if ub <= lb:
+            result["bins"] = [b["items"] for b in heur]
+            result["engine"] = "exact-optimal"
+            return result
     if use_exact and _HAS_ORTOOLS:
         # There's a gap the heuristic couldn't close. Give the exact solver a
         # bounded budget to try to beat it; if it can't in time, return the
@@ -331,9 +378,9 @@ def optimize(items, capacity, max_items_per_bin=None, keep_groups=False,
         # It returns None when there are too many distinct weights to
         # enumerate; only then fall back to the per-item model, and only if
         # that one is small enough to stay fast and in-memory.
-        bins, engine = _exact_patterns(items, cap, max_items_per_bin, ub, time_limit)
+        bins, engine = _exact_patterns(items, cap, max_items_per_bin, ub, time_limit, lb)
         if bins is None and len(items) * ub <= 40000:
-            bins, engine = _exact(items, cap, max_items_per_bin, ub, time_limit)
+            bins, engine = _exact(items, cap, max_items_per_bin, ub, time_limit, lb)
         if bins is not None and len(bins) < ub:
             result["bins"] = [b["items"] for b in bins]; result["engine"] = engine
             return result
@@ -407,26 +454,59 @@ def _bl_patterns(items, cap, max_items, n_trucks, hint_bins, time_limit):
         model.Add(sum(q[j] * y[i] for i, q in enumerate(shared) if q[j])
                   == sum(z[b, w] for b in bls if (b, w) in z))
     model.Add(sum(x.values()) + sum(y) <= n_trucks)
+
+    # LP relaxation of this same model: a floor on shared trucks, so the search
+    # stops the moment it reaches it instead of running out the clock
+    lp = pywraplp.Solver.CreateSolver("GLOP")
+    lx = {k: lp.NumVar(0, lp.infinity(), "") for k in x}
+    ly = [lp.NumVar(0, lp.infinity(), "") for _ in shared]
+    lz = {k: lp.NumVar(0, len(by[k]), "") for k in z}
+    for (b, w), lst in by.items():
+        ws, pats = own[b]
+        j = ws.index(w)
+        lp.Add(sum(p[j] * lx[b, k] for k, p in enumerate(pats) if p[j])
+               + lz[b, w] == len(lst))
+    for j, w in enumerate(weights):
+        lp.Add(sum(q[j] * ly[i] for i, q in enumerate(shared) if q[j])
+               == sum(lz[b, w] for b in bls if (b, w) in lz))
+    lp.Add(sum(lx.values()) + sum(ly) <= n_trucks)
+    lp.Minimize(sum(ly))
+    floor = 0
+    if lp.Solve() == pywraplp.Solver.OPTIMAL:
+        floor = max(0, _lp_ceil(lp.Objective().Value()))
+        model.Add(sum(y) >= floor)
     model.Minimize(sum(y))
 
-    # start from the plain plan: everything shared, which is always feasible
-    index = {q: i for i, q in enumerate(shared)}
-    use = [0] * len(shared)
+    # Start from the plain plan, each truck filed under what it really carries:
+    # one BL -> that BL's own pattern, several -> a shared pattern. It is always
+    # feasible, and it is often already at the floor — then that is the proof.
+    shared_at = {q: i for i, q in enumerate(shared)}
+    own_at = {b: {p: k for k, p in enumerate(own[b][1])} for b in bls}
+    hx, hy = {k: 0 for k in x}, [0] * len(shared)
+    hz = {k: 0 for k in z}
     for bin_items in hint_bins:
-        cnt = [0] * len(weights)
-        for it in bin_items:
-            cnt[weights.index(it["weight"])] += 1
-        i = index.get(tuple(cnt))
-        if i is None:
-            break
-        use[i] += 1
-    else:
-        for i, v in enumerate(y):
-            model.AddHint(v, use[i])
-        for v in x.values():
-            model.AddHint(v, 0)
-        for key, v in z.items():
-            model.AddHint(v, len(by[key]))
+        tags = {it["bl"] for it in bin_items}
+        if len(tags) == 1:
+            b = next(iter(tags))
+            ws = own[b][0]
+            cnt = [0] * len(ws)
+            for it in bin_items:
+                cnt[ws.index(it["weight"])] += 1
+            hx[b, own_at[b][tuple(cnt)]] += 1
+        else:
+            cnt = [0] * len(weights)
+            for it in bin_items:
+                cnt[weights.index(it["weight"])] += 1
+                hz[it["bl"], it["weight"]] += 1
+            hy[shared_at[tuple(cnt)]] += 1
+    if sum(hy) <= floor:
+        return [list(b) for b in hint_bins], "exact-optimal"
+    for k, v in x.items():
+        model.AddHint(v, hx[k])
+    for i, v in enumerate(y):
+        model.AddHint(v, hy[i])
+    for k, v in z.items():
+        model.AddHint(v, hz[k])
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_limit)
@@ -435,6 +515,8 @@ def _bl_patterns(items, cap, max_items, n_trucks, hint_bins, time_limit):
     st = solver.Solve(model)
     if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
+    if solver.ObjectiveValue() <= floor:
+        st = cp_model.OPTIMAL                # reached the LP floor: proven
 
     # hand out the real drums, in their original order
     queue = {key: list(reversed(v)) for key, v in by.items()}

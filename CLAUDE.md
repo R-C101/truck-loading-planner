@@ -16,7 +16,14 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   `len(items) * upper_bound <= 40000`), and a pure-Python heuristic
   (best/first-fit-decreasing + seeded random restarts + local improvement). It runs
   the heuristic first for a fast warm bound, short-circuits to `exact-optimal` when
-  that already meets the weight/count lower bound, otherwise proves it. Everything
+  that already meets the weight/count lower bound, then tries the **LP bound of the
+  pattern model** (`_pattern_lp_bound`, GLOP — deterministic, milliseconds) and
+  short-circuits again if that closes the gap; only then searches, with the bound
+  added as a constraint so CP-SAT can stop early. This matters for drum-by-drum
+  lists where every drum has its own weight: without the LP bound CP-SAT finds the
+  optimum instantly but burns the whole time limit failing to prove it.
+  `_lp_ceil` rounds with slack on purpose — a bound one too low only costs a proof,
+  one too high would be a wrong answer. Everything
   is **deterministic** (seeded) so the same input always gives the same plan.
   ⚠️ CP-SAT runs with `num_search_workers = 1` **on purpose**: multi-worker is
   non-deterministic and, on ortools 9.15 / Python 3.14, ignores the time limit and
@@ -28,11 +35,15 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   shared between BLs**. Stage 2 (`_bl_patterns`) is a CP-SAT pattern model: own
   trucks are patterns over one BL's drums, shared trucks are weight-only patterns
   fed from a pool any BL pays into, total capped at the stage-1 count, minimise
-  shared. Output order: each BL's own trucks in natural BL order (`_bl_key`, blank
+  shared, with its own LP floor as a constraint. The warm start is the plain plan
+  with each truck filed as own/shared by what it actually carries; if that already
+  sits on the LP floor it is returned as proven without searching. Output order: each BL's own trucks in natural BL order (`_bl_key`, blank
   BL last), then shared trucks. Falls back to `_bl_heuristic` (per-BL packing, then
   re-pack the k emptiest trucks together) when patterns can't be enumerated, and to
   the plain plan if any check fails. Checked against brute force on 300 random
-  shipments: exact path matches on (trucks, shared) every time.
+  shipments: exact path matches on (trucks, shared) every time; every LP-based
+  "proven" answer also checked against an independent solver (200 + 60 random
+  cases, no wrong claims).
   Running `python3 solver_core.py` self-tests on the drum shipment and must print
   **17 bins @ 21,500** and **16 bins @ 21,772**, all 81 items placed, none over cap.
 - **`streamlit_app.py`** — the web app the dad uses. Editable drum table (Item,
@@ -45,7 +56,10 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   and bump `grid_ver`, whose value is part of the `data_editor` key so the grid
   redraws instead of layering stale widget edits on top. `parse_block` reads a
   tab-separated block (header row auto-detected and mapped by name, otherwise
-  columns guessed positionally); `parse_columns` reads one Excel column per box and
+  columns guessed positionally; headings go through `_header_role`, which tries the
+  exact name, then the name minus its unit, then what it contains — real packing
+  lists say things like "Gross Wt. (Kgs.)"; if two headings map to the same
+  column the first wins); `parse_columns` reads one Excel column per box and
   matches them up row by row, keeping blank lines so rows can't shift. Number
   parsing is deliberately strict (`_clean_num`) so a container number like
   `MSKU1234567` is never mistaken for a weight.
