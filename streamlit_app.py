@@ -11,7 +11,7 @@ import re
 import time
 import pandas as pd
 import streamlit as st
-from solver_core import optimize
+from solver_core import optimize, optimize_by_bl, _bl_key
 
 LB = 2.20462262
 
@@ -38,6 +38,11 @@ st.markdown("""
   .bar{height:8px;background:#e3ebee}
   .bar span{display:block;height:100%;background:#2b6b80}
   .bar span.full{background:#c0522e}
+  .truckcard.shared{border-color:#e2c48f}
+  .truckcard.shared .top{background:#8a5a14}
+  .blhead{margin:22px 0 2px;padding:6px 12px;border-left:5px solid #1f4e5f;
+     background:#eef4f6;font-weight:bold;color:#1f4e5f;border-radius:4px}
+  .blhead.shared{border-left-color:#8a5a14;background:#f8f0e2;color:#6b450f}
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,12 +56,13 @@ st.markdown("""
 
 DEFAULT = pd.DataFrame({
     "Item":      pd.Series([], dtype="object"),
+    "BL":        pd.Series([], dtype="object"),
     "Container": pd.Series([], dtype="object"),
     "Drum_no":   pd.Series([], dtype="object"),
     "Weight_kg": pd.Series([], dtype="float"),
     "Qty":       pd.Series([], dtype="Int64"),
 })
-COLS = ["Item", "Container", "Drum_no", "Weight_kg", "Qty"]
+COLS = ["Item", "BL", "Container", "Drum_no", "Weight_kg", "Qty"]
 
 
 
@@ -71,7 +77,10 @@ COLS = ["Item", "Container", "Drum_no", "Weight_kg", "Qty"]
 _HEADER_MAP = {
     "item": "Item", "items": "Item", "description": "Item", "desc": "Item",
     "product": "Item", "material": "Item", "name": "Item", "drum": "Item",
-    "drumtype": "Item", "type": "Item",
+    "drumtype": "Item", "type": "Item", "destination": "Item", "dest": "Item",
+    "bl": "BL", "blno": "BL", "blnumber": "BL", "billoflading": "BL",
+    "billofladingno": "BL", "billofladingnumber": "BL", "bol": "BL",
+    "bolno": "BL", "hbl": "BL", "hblno": "BL", "mbl": "BL", "mblno": "BL",
     "container": "Container", "containerno": "Container", "cont": "Container",
     "contno": "Container", "containernumber": "Container", "box": "Container",
     "drumno": "Drum_no", "drumnumber": "Drum_no", "drumid": "Drum_no",
@@ -163,14 +172,15 @@ def _roles(grid):
 
 def _record(rec):
     item = str(rec.get("Item") or "").strip()
+    bl = str(rec.get("BL") or "").strip()
     cont = str(rec.get("Container") or "").strip()
     dno = str(rec.get("Drum_no") or "").strip()
     w, q = _num(rec.get("Weight_kg")), _num(rec.get("Qty"))
-    if not item and not cont and not dno and w is None and q is None:
+    if not item and not bl and not cont and not dno and w is None and q is None:
         return None
     if q is None and dno:
         q = 1                               # a numbered drum is one drum
-    return {"Item": item or None, "Container": cont or None,
+    return {"Item": item or None, "BL": bl or None, "Container": cont or None,
             "Drum_no": dno or None, "Weight_kg": w,
             "Qty": int(q) if q is not None else None}
 
@@ -205,9 +215,9 @@ def _lines(text):
     return ls
 
 
-def parse_columns(items, conts, drum_nos, weights, qtys):
+def parse_columns(items, bls, conts, drum_nos, weights, qtys):
     """Each column pasted into its own box; matched up row by row."""
-    cols = {"Item": _lines(items), "Container": _lines(conts),
+    cols = {"Item": _lines(items), "BL": _lines(bls), "Container": _lines(conts),
             "Drum_no": _lines(drum_nos), "Weight_kg": _lines(weights),
             "Qty": _lines(qtys)}
     n = max((len(v) for v in cols.values()), default=0)
@@ -220,13 +230,13 @@ def parse_columns(items, conts, drum_nos, weights, qtys):
 
 
 def _normalise(df):
-    """Same five columns, same order, right types — whatever came in."""
+    """Same columns, same order, right types — whatever came in."""
     df = df.copy()
     for c in COLS:
         if c not in df.columns:
             df[c] = None
     df = df[COLS + [c for c in df.columns if c not in COLS]]
-    for c in ("Item", "Container", "Drum_no"):
+    for c in ("Item", "BL", "Container", "Drum_no"):
         df[c] = df[c].astype("object")
     df["Weight_kg"] = pd.to_numeric(df["Weight_kg"], errors="coerce")
     df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce").round().astype("Int64")
@@ -247,6 +257,10 @@ with st.sidebar:
     use_maxn = st.checkbox("Limit drums per truck (space)")
     max_n = st.number_input("Max drums per truck", min_value=1, value=10, step=1, disabled=not use_maxn)
 
+    by_bl = st.checkbox("Load BL by BL", value=True)
+    st.caption("When the BL no. column is filled in, each BL gets its own trucks, "
+               "in BL order. Drums from different BLs only share a truck where "
+               "that saves one — it never costs an extra truck.")
     keep = st.checkbox("Keep drum types together where possible")
     prove = st.checkbox("Prove it's the fewest possible trucks", value=True)
     time_limit = st.slider("Max proof time (seconds)", 3, 60, 10, disabled=not prove)
@@ -299,8 +313,8 @@ def _preview_and_add(parsed, tag):
 
 
 st.subheader("1 · Drums in this shipment")
-st.caption("One row per drum type — the item, the container it comes from, the "
-           "weight of ONE drum (kg), and how many. If a row is a single drum with "
+st.caption("One row per drum type — the item, its BL number, the container it comes "
+           "from, the weight of ONE drum (kg), and how many. If a row is a single drum with "
            "its own number, put the number in **Drum no.** and leave the quantity "
            "empty; it counts as one drum. The two can be mixed in one shipment. "
            "Type into the table, paste from Excel, or upload a CSV, then check it "
@@ -313,12 +327,13 @@ with st.expander("📋 Paste from Excel", expanded=False):
                    "header row and any column order works.** Without one the columns "
                    "are read as item, container, drum no., weight, quantity — the "
                    "weight is found by its size, so leaving out the ones you don't "
-                   "have is fine. Check the preview either way.")
+                   "have is fine. The BL no. column is only picked up from a header "
+                   "row. Check the preview either way.")
         blk = st.text_area("Paste cells", height=170, label_visibility="collapsed",
                            key=f"paste_block_{st.session_state.paste_ver}",
-                           placeholder=("Item\tContainer\tWeight\tQty\n"
-                                        "8065kg drum\tMSKU1234567\t8065\t30\n"
-                                        "6491kg drum\tTGHU7654321\t6491\t12"))
+                           placeholder=("Item\tBL No\tContainer\tWeight\tQty\n"
+                                        "8065kg drum\tHLCU001\tMSKU1234567\t8065\t30\n"
+                                        "6491kg drum\tHLCU002\tTGHU7654321\t6491\t12"))
         _preview_and_add(parse_block(blk), "blk")
     with t_cols:
         st.caption("Copy one Excel column at a time — each value on its own line. "
@@ -327,15 +342,17 @@ with st.expander("📋 Paste from Excel", expanded=False):
         k = st.session_state.paste_ver
         q1, q2, q3 = st.columns(3)
         c_item = q1.text_area("Item", height=150, key=f"col_item_{k}")
-        c_cont = q2.text_area("Container no.", height=150, key=f"col_cont_{k}")
-        c_dno = q3.text_area("Drum no.", height=150, key=f"col_dno_{k}")
-        q4, q5 = st.columns(2)
-        c_wt = q4.text_area("Weight (kg)", height=150, key=f"col_wt_{k}")
-        c_qty = q5.text_area("Quantity", height=150, key=f"col_qty_{k}")
-        if any("\t" in (t or "") for t in (c_item, c_cont, c_dno, c_wt, c_qty)):
+        c_bl = q2.text_area("BL no.", height=150, key=f"col_bl_{k}")
+        c_cont = q3.text_area("Container no.", height=150, key=f"col_cont_{k}")
+        q4, q5, q6 = st.columns(3)
+        c_dno = q4.text_area("Drum no.", height=150, key=f"col_dno_{k}")
+        c_wt = q5.text_area("Weight (kg)", height=150, key=f"col_wt_{k}")
+        c_qty = q6.text_area("Quantity", height=150, key=f"col_qty_{k}")
+        boxes = (c_item, c_bl, c_cont, c_dno, c_wt, c_qty)
+        if any("\t" in (t or "") for t in boxes):
             st.info("That looks like more than one column — the other tab handles "
                     "a whole block in one go.")
-        _preview_and_add(parse_columns(c_item, c_cont, c_dno, c_wt, c_qty), "cols")
+        _preview_and_add(parse_columns(*boxes), "cols")
 
 up = st.file_uploader("Upload CSV (optional)", type=["csv"], label_visibility="collapsed")
 if up is not None:
@@ -350,6 +367,7 @@ edited = st.data_editor(
     hide_index=True, key=f"grid_{st.session_state.grid_ver}",
     column_config={
         "Item": st.column_config.TextColumn("Item", width="medium"),
+        "BL": st.column_config.TextColumn("BL no.", width="small"),
         "Container": st.column_config.TextColumn("Container no.", width="medium"),
         "Drum_no": st.column_config.TextColumn("Drum no.", width="small"),
         "Weight_kg": st.column_config.NumberColumn("Weight (kg)", min_value=0, step=1),
@@ -369,13 +387,31 @@ def _row_qty(r):
 _ok = edited.dropna(subset=["Weight_kg"]) if len(edited) else edited
 if len(_ok):
     _q = _ok.apply(_row_qty, axis=1)
+    _nbl = _ok["BL"].dropna().astype(str).str.strip().replace("", None).nunique()
     st.caption(f"**{len(_ok)} rows · {int(_q.sum()):,} drums · "
-               f"{(_ok['Weight_kg'] * _q).sum():,.0f} kg** in the table.")
+               f"{(_ok['Weight_kg'] * _q).sum():,.0f} kg**"
+               + (f" · {_nbl} BLs" if _nbl > 1 else "") + " in the table.")
 if st.columns([1, 3])[0].button("Clear table", width="stretch"):
     st.session_state.table_df = _normalise(DEFAULT.copy())
     st.session_state.grid_ver += 1
     st.session_state.pop("last_edited", None)
     st.rerun()
+
+
+def _ranges(nums):
+    """[1, 2, 3, 7, 9, 10] -> '1–3, 7, 9–10'"""
+    nums, out, i = sorted(nums), [], 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        out.append(str(nums[i]) if i == j else f"{nums[i]}–{nums[j]}")
+        i = j + 1
+    return ", ".join(out)
+
+
+def _bl_name(bl):
+    return bl if bl else "(no BL)"
 
 
 def to_kg(v, unit):
@@ -409,11 +445,13 @@ if go:
         cont = "" if cont is None or pd.isna(cont) else str(cont).strip()
         dno = r.get("Drum_no")
         dno = "" if dno is None or pd.isna(dno) else str(dno).strip()
+        bl = r.get("BL")
+        bl = "" if bl is None or pd.isna(bl) else str(bl).strip()
         for _ in range(q):
-            # container and drum number ride along on the item purely as labels;
-            # neither ever affects the packing
+            # container and drum number ride along on the item purely as labels
+            # and never affect the packing; the BL only does when BL-by-BL is on
             items.append({"weight": w, "label": desc, "container": cont,
-                          "drum_no": dno, "group": f"{desc}|{w}"})
+                          "drum_no": dno, "bl": bl, "group": f"{desc}|{w}"})
     if not items:
         st.error("Please enter at least one row with a weight and a quantity.")
         st.stop()
@@ -426,20 +464,22 @@ if go:
                 f"of them should be a larger quantity, put the number in above.")
 
     cap_kg = to_kg(cap_val, cap_unit)
+    # BL by BL only means something with at least two BLs (a blank counts as one)
+    use_bl = by_bl and len({it["bl"] for it in items}) > 1
+    if use_bl and keep:
+        st.caption("Loading BL by BL, so “keep drum types together” is not used.")
     spin_msg = (f"Optimising and proving the fewest possible trucks… "
                 f"(stops after {int(time_limit)}s on an awkward load)" if prove
                 else "Optimising… (fast plan, no optimality proof)")
     with st.spinner(spin_msg):
         t0 = time.perf_counter()
-        res = optimize(
-            items, cap_kg,
-            max_items_per_bin=int(max_n) if use_maxn else None,
-            keep_groups=keep,
-            safety_margin=(margin_val if use_margin else 0.0),
-            margin_is_pct=(use_margin and margin_unit == "%"),
-            time_limit=time_limit,
-            force=None if prove else "heuristic",
-        )
+        opts = dict(max_items_per_bin=int(max_n) if use_maxn else None,
+                    safety_margin=(margin_val if use_margin else 0.0),
+                    margin_is_pct=(use_margin and margin_unit == "%"),
+                    time_limit=time_limit,
+                    force=None if prove else "heuristic")
+        res = (optimize_by_bl(items, cap_kg, **opts) if use_bl
+               else optimize(items, cap_kg, keep_groups=keep, **opts))
         elapsed = time.perf_counter() - t0
 
     if res["engine"] == "infeasible":
@@ -467,42 +507,103 @@ if go:
                f"No truck exceeds {res['capacity_used']:,.0f} kg. "
                f"Solved in {elapsed:.2f} s.")
 
+    bin_bl = res["bin_bl"] if use_bl else [None] * len(bins)
+    if use_bl:
+        n_mixed = res["mixed"]
+        how = ("the fewest possible without adding a truck"
+               if res["mix_engine"] == "exact-optimal"
+               else "kept as low as it could find in the time allowed")
+        st.info(f"Loaded BL by BL: {len(bins) - n_mixed} trucks carry a single BL"
+                + (f", and {n_mixed} {'is' if n_mixed == 1 else 'are'} shared "
+                   f"between BLs — {how}." if n_mixed else
+                   " and none have to be shared."))
+
+        # overview per BL, which is what gets checked and passed on first
+        by = {}
+        for ti, (b, tb) in enumerate(zip(bins, bin_bl), 1):
+            for it in b:
+                e = by.setdefault(it["bl"], {"drums": 0, "kg": 0.0, "own": set(),
+                                             "shared": set(), "on_shared": 0})
+                e["drums"] += 1
+                e["kg"] += it["weight"]
+                if tb is None:
+                    e["shared"].add(ti); e["on_shared"] += 1
+                else:
+                    e["own"].add(ti)
+        bl_rows = [{"BL": _bl_name(k), "Drums": v["drums"],
+                    "Total_kg": round(v["kg"], 1),
+                    "Own_trucks": len(v["own"]),
+                    "Own_truck_nos": _ranges(v["own"]),
+                    "Drums_on_shared_trucks": v["on_shared"],
+                    "Shared_truck_nos": _ranges(v["shared"])}
+                   for k, v in sorted(by.items(), key=lambda kv: _bl_key(kv[0]))]
+        bl_df = pd.DataFrame(bl_rows)
+        st.subheader("By BL")
+        st.dataframe(bl_df, width="stretch", hide_index=True)
+
     # a drum number identifies one physical drum, so rows only collapse together
     # when they share one (or when there are no drum numbers at all)
     has_dno = any(it.get("drum_no") for b in bins for it in b)
+    has_bl = any(it.get("bl") for b in bins for it in b)
 
     rows, summary = [], []
-    for ti, b in enumerate(bins, 1):
+    section = object()
+    for ti, (b, tb) in enumerate(zip(bins, bin_bl), 1):
         load = sum(i["weight"] for i in b)
         pct = min(100, load / res["capacity_used"] * 100)
         spare = res["capacity_used"] - load
+        shared = use_bl and tb is None
+        truck_bls = sorted({it.get("bl", "") for it in b}, key=_bl_key)
+        truck_tag = ("SHARED: " + " + ".join(map(_bl_name, truck_bls)) if shared
+                     else _bl_name(truck_bls[0]) if has_bl else "")
+
+        if use_bl:                           # a heading where each BL starts
+            key = "shared" if shared else tb
+            if key != section:
+                section = key
+                count = (sum(t is None for t in bin_bl) if shared
+                         else sum(t == tb for t in bin_bl))
+                label = ("Shared between BLs" if shared else f"BL {_bl_name(tb)}")
+                st.markdown(f'<div class="blhead{" shared" if shared else ""}">'
+                            f'{label} · {count} truck{"s" if count != 1 else ""}</div>',
+                            unsafe_allow_html=True)
+
         g = {}
         for it in b:
-            k = (it["label"], it.get("container", ""), it.get("drum_no", ""),
-                 it["weight"])
+            k = (it["label"], it.get("bl", ""), it.get("container", ""),
+                 it.get("drum_no", ""), it["weight"])
             g[k] = g.get(k, 0) + 1
         st.markdown(f"""
-        <div class="truckcard">
-          <div class="top"><b>Truck {ti}</b>
+        <div class="truckcard{' shared' if shared else ''}">
+          <div class="top"><b>Truck {ti}{' · ' + truck_tag if truck_tag else ''}</b>
             <span>{load:,.0f} kg / {load*LB:,.0f} lb · {len(b)} drums · {pct:.0f}% full</span></div>
           <div class="bar"><span class="{'full' if pct>97 else ''}" style="width:{pct}%"></span></div>
         </div>""", unsafe_allow_html=True)
-        lines = sorted(g.items(), key=lambda kv: (-kv[0][3], kv[0][1], kv[0][2]))
+        lines = sorted(g.items(), key=lambda kv: (_bl_key(kv[0][1]), -kv[0][4],
+                                                  kv[0][2], kv[0][3]))
         df = pd.DataFrame(
-            [{"Item": k[0], "Container": k[1],
-              **({"Drum no.": k[2]} if has_dno else {}),
-              "Weight/drum (kg)": k[3], "Qty": v, "Line (kg)": k[3]*v}
+            [{"Item": k[0],
+              **({"BL no.": _bl_name(k[1])} if shared else {}),
+              "Container": k[2],
+              **({"Drum no.": k[3]} if has_dno else {}),
+              "Weight/drum (kg)": k[4], "Qty": v, "Line (kg)": k[4]*v}
              for k, v in lines])
         st.dataframe(df, width="stretch", hide_index=True)
         for k, v in lines:
-            rows.append({"Truck": ti, "Item": k[0], "Container": k[1],
-                         **({"Drum_no": k[2]} if has_dno else {}),
-                         "Weight_kg": k[3], "Qty": v, "Line_kg": k[3]*v,
+            rows.append({"Truck": ti,
+                         **({"Truck_BL": "SHARED" if shared else _bl_name(tb)}
+                            if use_bl else {}),
+                         "Item": k[0],
+                         **({"BL": k[1]} if has_bl else {}),
+                         "Container": k[2],
+                         **({"Drum_no": k[3]} if has_dno else {}),
+                         "Weight_kg": k[4], "Qty": v, "Line_kg": k[4]*v,
                          "Truck_Total_kg": round(load, 1),
                          "Truck_Total_lb": round(load*LB, 1),
                          "Truck_Drums": len(b),
                          "Truck_Percent_Full": round(pct, 1)})
         summary.append({"Truck": ti,
+                        **({"BL": truck_tag} if has_bl else {}),
                         "Total_kg": round(load, 1),
                         "Total_lb": round(load*LB, 1),
                         "Drums": len(b),
@@ -519,12 +620,15 @@ if go:
     types = {}
     for b in bins:
         for it in b:
-            k = (it["label"], it.get("container", ""), it["weight"])
+            k = (it.get("bl", ""), it["label"], it.get("container", ""), it["weight"])
             types[k] = types.get(k, 0) + 1
-    drum_rows = [{"Item": k[0], "Container": k[1], "Weight_kg": k[2], "Qty": v,
-                  "Total_kg": round(k[2]*v, 1), "Total_lb": round(k[2]*v*LB, 1)}
-                 for k, v in sorted(types.items(), key=lambda kv: (-kv[0][2], kv[0][1]))]
-    drum_rows.append({"Item": "TOTAL", "Container": None, "Weight_kg": None,
+    drum_rows = [{**({"BL": _bl_name(k[0])} if has_bl else {}),
+                  "Item": k[1], "Container": k[2], "Weight_kg": k[3], "Qty": v,
+                  "Total_kg": round(k[3]*v, 1), "Total_lb": round(k[3]*v*LB, 1)}
+                 for k, v in sorted(types.items(),
+                                    key=lambda kv: (_bl_key(kv[0][0]), -kv[0][3], kv[0][2]))]
+    drum_rows.append({**({"BL": None} if has_bl else {}),
+                      "Item": "TOTAL", "Container": None, "Weight_kg": None,
                       "Qty": sum(types.values()),
                       "Total_kg": round(res["total_weight"], 1),
                       "Total_lb": round(res["total_weight"]*LB, 1)})
@@ -537,6 +641,8 @@ if go:
     cbuf = io.StringIO()
     plan_df.to_csv(cbuf, index=False)
     cbuf.write("\nTRUCK SUMMARY\n");  summary_df.to_csv(cbuf, index=False)
+    if use_bl:
+        cbuf.write("\nBY BL\n");      bl_df.to_csv(cbuf, index=False)
     cbuf.write("\nDRUMS SHIPPED\n");  drum_df.to_csv(cbuf, index=False)
     d1.download_button("⬇ Download plan (CSV)", cbuf.getvalue().encode(),
                        "loading_plan.csv", "text/csv", width="stretch")
@@ -544,6 +650,8 @@ if go:
     with pd.ExcelWriter(xbuf, engine="openpyxl") as xw:
         plan_df.to_excel(xw, index=False, sheet_name="Loading Plan")
         summary_df.to_excel(xw, index=False, sheet_name="Truck Summary")
+        if use_bl:
+            bl_df.to_excel(xw, index=False, sheet_name="By BL")
         drum_df.to_excel(xw, index=False, sheet_name="Drums Shipped")
     d2.download_button("⬇ Download plan (Excel)", xbuf.getvalue(),
                        "loading_plan.xlsx",

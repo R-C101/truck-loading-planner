@@ -22,10 +22,21 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   non-deterministic and, on ortools 9.15 / Python 3.14, ignores the time limit and
   hangs forever. Do not raise it.
   Supports: weight cap, safety margin (kg or %), max items per bin, keep-groups.
+  **`optimize_by_bl(items, capacity, ...)`** loads by bill of lading: items carry a
+  `bl`. Objective is lexicographic — **fewest trucks first** (exactly `optimize()`'s
+  count, since sharing is allowed it's the same number), **then fewest trucks
+  shared between BLs**. Stage 2 (`_bl_patterns`) is a CP-SAT pattern model: own
+  trucks are patterns over one BL's drums, shared trucks are weight-only patterns
+  fed from a pool any BL pays into, total capped at the stage-1 count, minimise
+  shared. Output order: each BL's own trucks in natural BL order (`_bl_key`, blank
+  BL last), then shared trucks. Falls back to `_bl_heuristic` (per-BL packing, then
+  re-pack the k emptiest trucks together) when patterns can't be enumerated, and to
+  the plain plan if any check fails. Checked against brute force on 300 random
+  shipments: exact path matches on (trucks, shared) every time.
   Running `python3 solver_core.py` self-tests on the drum shipment and must print
   **17 bins @ 21,500** and **16 bins @ 21,772**, all 81 items placed, none over cap.
 - **`streamlit_app.py`** — the web app the dad uses. Editable drum table (Item,
-  Container no., Weight, Qty), truck limit with kg/lb/tonne unit, optional safety
+  BL no., Container no., Drum no., Weight, Qty), truck limit with kg/lb/tonne unit, optional safety
   margin / max-drums / keep-together, a Calculate button, per-truck result cards
   with fill bars, and CSV + Excel download. Styled to match the offline HTML tool.
   Built entirely on `solver_core.optimize`.
@@ -55,6 +66,14 @@ constraints. The end user is non-technical and only ever sees the Streamlit app.
   actually has one, and truck lines only collapse together when they share a drum
   number (or have none). The Drums Shipped sheet always groups by type/container
   and ignores drum numbers — it is the summary; the per-drum detail is on the plan.
+  **BL no.** is a real column (the dad puts the destination in Item for now). It is
+  only read from a header row — headerless `_roles` never guesses a BL. The sidebar
+  "Load BL by BL" (default on) switches to `optimize_by_bl` when the table has two
+  or more distinct BLs (blank counts as one); it overrides keep-together. Then the
+  results get a **By BL** table/sheet (own truck numbers, drums on shared trucks),
+  a heading before each BL's trucks, amber cards for shared trucks, and `Truck_BL`
+  on the Loading Plan. BL columns only appear in the output when some drum has a
+  BL, so a shipment without BLs looks exactly as before.
 - **`Truck_Loading_Planner.html`** — standalone offline browser tool (same idea,
   pure-JS heuristic, no install/internet). Reference / backup for field use.
 - **`drum_truck_planner.py`** — original exact CLI (edit the DRUMS list + caps, run).

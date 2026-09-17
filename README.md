@@ -18,6 +18,9 @@ one truck from a shipment is real money saved.
   truck is.
 - Takes the shipment straight out of Excel — paste the cells (or one column at a
   time) and they fill the table, ready to check and correct before calculating.
+- Handles shipments covering several bills of lading: each BL is loaded on its
+  own trucks, in BL order, and drums from different BLs share a truck only where
+  that saves one — the fewest trucks always comes first, then the least mixing.
 - Reads the list either way round, and both at once: a row per drum **type** with
   a quantity, or a row per **individual drum** with its own drum number and no
   quantity to type. Drum numbers are carried through to the plan, so each drum can
